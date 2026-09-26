@@ -1,0 +1,637 @@
+import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource } from './db.js';
+import { generateReply } from './ai.js';
+import { channel, adapterFor } from './channels/index.js';
+import { detectLang } from './lang.js';
+import { mediaPath } from './media.js';
+import fs from 'node:fs';
+import { withinWorkHours, scheduleSetting, sweepStale, workHours, isHoliday } from './schedule.js';
+import { notifyHandoff } from './notify.js';
+import { transcribe, sttConfigured } from './stt.js';
+import { analyzeVideo, duration, videoLimitMinutes } from './video.js';
+import { isStopRequest, cadence, missingFor, touchGoal, jitterMinutes, confirmHours, settings as nudgeSettings } from './followups.js';
+import { notifyManagers, adminLink } from './notify.js';
+import { aiProvider } from './ai.js';
+import { dominantLang } from './lang.js';
+import { labelFor } from './sources.js';
+
+const listeners = new Set();
+
+// Чёрный список: этим номерам бот не отвечает, и их сообщения не попадают в заявки —
+// личные контакты, сотрудники, спам. Правится в админке на лету, перезапуск не нужен.
+// Сравниваем по последним 9 цифрам: так «050-123-4567» и «+972 50 123 4567» — один номер.
+const tail = (v) => String(v ?? '').replace(/\D/g, '').slice(-9);
+function blocked(phone) {
+  const me = tail(phone);
+  if (me.length < 7) return false;
+  return (getSetting('blocked_numbers') || '')
+    .split(/[,;\n]+/).map(tail).filter((n) => n.length >= 7)
+    .includes(me);
+}
+export const subscribe = (fn) => (listeners.add(fn), () => listeners.delete(fn));
+export const emit = (event, data) => {
+  for (const fn of listeners) { try { fn(event, data); } catch {} }
+};
+
+/**
+ * Служебные фразы бота — не ответ модели, а текст из кода: «сейчас посмотрю
+ * видео», «подключаю менеджера». Их тоже надо говорить на языке клиента:
+ * женщина пишет на иврите, а в ответ прилетает русский — выглядит как чужой чат.
+ */
+const PHRASES = {
+  video: {
+    ru: 'Смотрю видео, минутку',
+    uk: 'Дивлюсь відео, хвилинку',
+    he: 'מסתכלת על הסרטון, רגע',
+    en: 'Watching the video, one moment'
+  },
+  longVideo: {
+    ru: 'Видео длинное, передаю коллеге - она посмотрит и напишет вам.',
+    uk: 'Відео довге, передаю колезі - вона подивиться і напише вам.',
+    he: 'הסרטון ארוך, מעבירה לנציגה - היא תצפה ותחזור אליכם.',
+    en: "The video is long, I'm passing it to my colleague - she'll watch it and get back to you."
+  },
+  human: {
+    ru: 'Секунду, подключаю менеджера.',
+    uk: 'Секунду, підключаю менеджера.',
+    he: 'רגע, מחברת אתכם לנציג.',
+    en: 'One moment, connecting you with a manager.'
+  }
+};
+const phrase = (key, convId, text = '') =>
+  PHRASES[key][dominantLang(history(convId, 10)) || (text ? detectLang(text) : '') || 'ru'] ?? PHRASES[key].ru;
+
+/** Приветствие хранится строками вида «uk: текст»; берём подходящее, иначе первое. */
+function pickGreeting(text) {
+  const raw = (getSetting('greeting') || '').trim();
+  if (!raw) return '';
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  const map = new Map();
+  for (const line of lines) {
+    const m = /^([a-z]{2}):\s*(.+)$/i.exec(line);
+    if (m) map.set(m[1].toLowerCase(), m[2]);
+  }
+  // {company} в тексте приветствия — название компании из настроек
+  const fill = (s) => s.replaceAll('{company}', getSetting('company') || '');
+  if (!map.size) return fill(raw);                 // одна строка без префикса — как есть
+  return fill(map.get(detectLang(text)) ?? map.get('ru') ?? [...map.values()][0]);
+}
+
+/**
+ * Метка источника в тексте: ссылки вида wa.me/…?text=…%20%23avito приводят
+ * клиента с решёткой в первом сообщении. Работает там, где карточки рекламы нет.
+ */
+function tagSource(text) {
+  const m = /(?:^|\s)#([a-zа-я0-9_-]{2,20})/i.exec(String(text || ''));
+  return m ? { source: 'Метка ' + m[1].toLowerCase(), title: '', url: '', ref: m[1] } : null;
+}
+
+/**
+ * Сбой ИИ человеческим языком. В уведомление менеджеру и в админку уходил
+ * необработанный текст ошибки: однажды это был JSON со стеком на пол-экрана,
+ * из которого не понять ни клиента, ни что делать. Подробности — в лог сервера.
+ */
+function aiErrorText(e) {
+  const m = String(e?.message ?? '');
+  if (/structured output|не по схеме|schema|parse/i.test(m)) return 'ИИ ответил не по формату — ответьте сами';
+  if (/429|rate.?limit|overloaded/i.test(m)) return 'ИИ перегружен — ответьте сами';
+  if (/401|403|api.?key|credit|billing/i.test(m)) return 'проблема с ключом или оплатой ИИ';
+  if (/timeout|ETIMEDOUT|ECONNRESET|fetch failed|network/i.test(m)) return 'ИИ не ответил вовремя';
+  return 'сбой ИИ: ' + m.split('\n')[0].slice(0, 120);
+}
+
+/** Что увидели на видео — сразу в карточку заявки, чтобы менеджер не пересматривал. */
+function applyReport(convId, report) {
+  const conv = getConversation(convId);
+  if (!conv) return;
+  const lead = JSON.parse(conv.lead || '{}');
+  lead.rooms = [...(lead.rooms ?? []), ...(report.rooms ?? [])].slice(0, 12);
+  if (report.items?.length) {
+    const had = String(lead.items || '').split(',').map((x) => x.trim()).filter(Boolean);
+    lead.items = [...new Set([...had, ...report.items])].join(', ');
+  }
+  if (!lead.extras && report.extras) lead.extras = report.extras;
+  db.prepare('UPDATE conversations SET lead=? WHERE id=?').run(JSON.stringify(lead), convId);
+  emit('conversations', null);
+}
+
+/** Можно ли назначить переезд на эту дату: рабочий день и не праздник. */
+function workableDay(iso) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+  if (isHoliday(iso)) return false;
+  const day = new Date(iso + 'T12:00:00Z').getUTCDay();
+  return Array.isArray(workHours()[day]);
+}
+
+function flagHuman(convId, reason) {
+  notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
+  // ai_enabled=0 обязательно: иначе бот молчит (status=human), а интерфейс
+  // показывает «Перехватить», и вернуть ИИ нечем
+  db.prepare("UPDATE conversations SET needs_human=1, handoff_reason=?, status='human', ai_enabled=0 WHERE id=?")
+    .run(reason, convId);
+}
+
+/**
+ * Клиенты в мессенджере почти всегда пишут очередью коротких реплик.
+ * Отвечать на каждую отдельно — значит слать дубли и жечь лимит запросов,
+ * поэтому ждём, пока человек договорит, и отвечаем один раз на всю пачку.
+ */
+const debounceMs = () => Math.max(500, Number(getSetting('reply_delay')) || 4000);
+const timers = new Map();    // conv_id → таймер отложенного ответа
+const busy = new Set();      // conv_id → ответ уже генерируется
+
+function scheduleReply(convId, ch, text) {
+  clearTimeout(timers.get(convId));
+  timers.set(convId, setTimeout(() => {
+    timers.delete(convId);
+    // если предыдущий ответ ещё идёт — не наслаиваемся, подождём и попробуем снова
+    if (busy.has(convId)) return scheduleReply(convId, ch, text);
+    busy.add(convId);
+    respond(convId, ch, text).finally(() => busy.delete(convId));
+  }, debounceMs()));
+}
+
+/** Входящее сообщение клиента: сохранить → при включённом ИИ поставить ответ в очередь. */
+/**
+ * Приём сообщения. Обёртка существует ради одной строчки — catch: раньше любая
+ * ошибка здесь (сбойный ролик, недоступный ffmpeg) всплывала в обработчик событий
+ * канала, становилась unhandled rejection и роняла процесс. Клиент видел «смотрю
+ * видео, минутку» и тишину, а сервис молча перезапускался.
+ */
+export async function handleIncoming(msg, ch = channel) {
+  try {
+    await processIncoming(msg, ch);
+  } catch (e) {
+    console.error('обработка сообщения:', e.stack || e.message);
+    const conv = db.prepare('SELECT * FROM conversations WHERE channel=? AND phone=?').get(ch.name, msg.phone);
+    if (!conv) return;
+    flagHuman(conv.id, 'сбой при обработке сообщения — ответьте сами');
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Сбой при обработке: ' + e.message, error: '1' });
+    try {
+      await adapterFor(conv).send(conv, phrase('human', conv.id, msg.text || ''));
+      addMessage(conv.id, { direction: 'out', author: 'ai', body: phrase('human', conv.id, msg.text || '') });
+    } catch {}
+    emit('conversations', null);
+    emit('message', { conv_id: conv.id });
+  }
+}
+
+async function processIncoming({ phone, name, text, wa_id, chat_id = null, media = [], ref = null }, ch = channel) {
+  if (messageExists(wa_id)) return;   // повторная доставка того же вебхука
+  if (blocked(phone)) {
+    // вложение канал уже сохранил на диск — за номером из чёрного списка не храним
+    for (const it of media) for (const f of [it.file, ...(it.frames ?? [])]) fs.rm(mediaPath(f), { force: true }, () => {});
+    return;
+  }
+  const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
+  // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки.
+  // Если в справочнике кампаний нашёлся ключ — пишем название кампании, а не «Реклама Facebook»
+  const src = ref || tagSource(text);
+  if (src) {
+    const named = labelFor(src, text);
+    setSource(conv.id, named ? { ...src, source: named } : src);
+  }
+
+  // Голосовые: расшифровываем в текст, дальше бот работает с ним как с обычным
+  // сообщением. Сам файл остаётся в диалоге — менеджер может послушать.
+  const voices = media.filter((m) => m.kind === 'audio');
+  // язык подсказываем по прошлым сообщениям клиента — так расшифровка точнее
+  const hint = voices.length ? dominantLang(history(conv.id)) : '';
+  for (const v of voices) {
+    try { v.text = await transcribe(v.file, hint); }
+    catch (e) { console.error('расшифровка голосового:', e.message); }
+  }
+  const said = voices.map((v) => v.text).filter(Boolean).join('\n');
+  const body = [text, said].filter(Boolean).join('\n');
+
+  const msg = addMessage(conv.id, { direction: 'in', author: 'customer', body, wa_id, media });
+
+  // «не пишите мне» — выключаем все напоминания по этому диалогу навсегда
+  if (isStopRequest(body)) {
+    db.prepare('UPDATE conversations SET nudge_stop=1, followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Клиент просил не писать: напоминания для этого диалога выключены' });
+  }
+  // клиент ответил — счётчик напоминаний обнуляем
+  db.prepare('UPDATE conversations SET unread = unread + 1, nudges = 0 WHERE id=?').run(conv.id);
+  emit('message', { conv_id: conv.id, message: msg });
+  emit('conversations', null);
+
+  const fresh = getConversation(conv.id);
+  const aiOn = getSetting('ai_global') === '1' && fresh.ai_enabled === 1;
+  if (!aiOn) return;
+
+  // голос не расшифровался (сервис не настроен или сбой) — бот не угадывает, зовёт человека
+  if (voices.length && !said) {
+    flagHuman(conv.id, sttConfigured() ? 'не удалось расшифровать голосовое' : 'голосовое сообщение — послушайте сами');
+    emit('conversations', null);
+    return;
+  }
+
+  // Видео разбираем до ответа: кадры по смене сцены плюс слова клиента с этого же
+  // отрезка. Ролик длиной в минуту разбирается десятки секунд — предупреждаем клиента.
+  const clips = media.filter((m) => m.kind === 'video');
+  if (clips.length && aiProvider.configured()) {
+    const lengths = await Promise.all(clips.map((c) => duration(c.file)));
+    if (Math.max(...lengths) > (Number(process.env.VIDEO_NOTE_SECONDS) || 20)) {
+      const note = phrase('video', conv.id, text);
+      try {
+        await adapterFor(fresh).send(fresh, note);
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: note, kind: 'interim' });
+        emit('message', { conv_id: conv.id });
+      } catch {}
+    }
+    let long = null;
+    for (const clip of clips) {
+      try {
+        const report = await analyzeVideo(clip, aiProvider);
+        if (report?.tooLong) { long = report; continue; }
+        if (report) { clip.report = report; applyReport(conv.id, report); }
+      } catch (e) {
+        console.error('разбор видео:', e.message);
+      }
+    }
+    db.prepare('UPDATE messages SET media=? WHERE id=?').run(JSON.stringify(media), msg.id);
+    emit('message', { conv_id: conv.id });
+    if (long) {
+      flagHuman(conv.id, `видео на ${long.minutes} мин — длиннее ${videoLimitMinutes()}, посмотрите сами`);
+      // клиент только что получил «смотрю видео» — уйти в тишину нельзя
+      try {
+        const say = phrase('longVideo', conv.id, text);
+        await adapterFor(fresh).send(fresh, say);
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: say });
+      } catch (e) {
+        console.error('не отправилось сообщение о длинном видео:', e.message);
+      }
+      emit('conversations', null);
+      emit('message', { conv_id: conv.id });
+      return;
+    }
+  }
+
+  scheduleReply(conv.id, ch, body);
+}
+
+/** Собственно ответ: вызывается один раз на всю пачку сообщений клиента. */
+async function respond(convId, ch, text) {
+  const fresh = getConversation(convId);
+  if (!fresh) return;
+  // за время паузы менеджер мог перехватить диалог
+  if (getSetting('ai_global') !== '1' || fresh.ai_enabled !== 1) return;
+
+  // Клиенту уже ответили на всё, что он написал. Так бывает, когда сообщение
+  // пришло, пока бот отвечал на предыдущее: очередь запускала второй ответ,
+  // и модель, не увидев ничего нового, переспрашивала то же самое.
+  // «Смотрю видео, минутку» — не ответ, а знак, что бот на связи: если считать
+  // его ответом, настоящая реплика после разбора ролика уже не уйдёт
+  const lastOut = db.prepare(`SELECT id FROM messages WHERE conv_id=? AND direction='out'
+    AND author IN ('ai','human') AND (kind IS NULL OR kind <> 'interim')
+    ORDER BY id DESC LIMIT 1`).get(convId)?.id ?? 0;
+  const hasNew = db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='in' AND id > ?")
+    .get(convId, lastOut);
+  if (!hasNew) return;
+
+  const conv = fresh;
+
+  // ночью и в выходные живого менеджера нет: либо бот предупреждает об этом,
+  // либо молчит и заявка ждёт утра
+  const offHours = !withinWorkHours();
+  const mode = scheduleSetting('off_hours');
+  if (offHours && mode === 'silent') {
+    db.prepare("UPDATE conversations SET needs_human=1, handoff_reason='пришло в нерабочее время' WHERE id=?")
+      .run(conv.id);
+    emit('conversations', null);
+    return;
+  }
+
+  emit('typing', { conv_id: conv.id });
+
+  let out;
+  try {
+    out = await generateReply(fresh, history(conv.id), {
+      offHours: offHours && mode === 'notice',
+      offHoursNote: scheduleSetting('off_hours_note') || 'Менеджер подтвердит заказ в рабочие часы.'
+    });
+  } catch (e) {
+    console.error('ИИ не ответил:', e.message);
+    const short = aiErrorText(e);
+    lastAiError = { message: short, at: new Date().toISOString() };
+    flagHuman(conv.id, short);
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'ИИ не смог ответить: ' + short, error: '1' });
+    // Клиент написал впервые и не получил ничего — тишина хуже короткой фразы.
+    // Одно сообщение на диалог: дальше отвечает менеджер, которому уже ушло уведомление.
+    const silent = !db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='out' AND author IN ('ai','human') LIMIT 1").get(conv.id);
+    if (silent) {
+      const hello = [pickGreeting(text), phrase('human', conv.id, text)].filter(Boolean).join('\n');
+      try {
+        const wa = (await adapterFor(fresh).send(fresh, hello)).wa_id;
+        addMessage(conv.id, { direction: 'out', author: 'ai', body: hello, wa_id: wa });
+      } catch (sendErr) {
+        console.error('не отправилось приветствие после сбоя ИИ:', sendErr.message);
+      }
+    }
+    emit('conversations', null);
+    emit('message', { conv_id: conv.id });
+    return;
+  }
+
+  lastAiError = null;                 // ответ прошёл — прошлая ошибка неактуальна
+
+  // Дату заказа проверяем кодом: модель может записать день, который сама же
+  // отклонила, и он уедет в календарь на выходной или праздник.
+  if (out.lead?.date_iso && !workableDay(out.lead.date_iso)) {
+    out.lead.date_iso = '';
+    if (out.lead.stage === 'дата согласована') out.lead.stage = 'уточняем';
+  }
+
+  const lead = { ...JSON.parse(fresh.lead || '{}'), ...Object.fromEntries(Object.entries(out.lead || {}).filter(([, v]) => v)) };
+  // Готовая заявка — без адреса это не заявка, даже если модель поспешила
+  // дату подтверждает человек: бот только записывает пожелание клиента
+  if (lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
+  const ready = out.lead_ready && Boolean(lead.district || lead.address);
+  if (ready) lead.stage = 'заявка готова';
+  db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
+    .run(JSON.stringify(lead), out.summary || fresh.summary, conv.id);
+
+  // «напишите после ремонта», «перезвоните в январе» — ставим себе напоминание
+  if (/^\d{4}-\d{2}-\d{2}$/.test(out.follow_up_at || '')) {
+    db.prepare('UPDATE conversations SET followup_at=?, followup_note=?, nudges=0 WHERE id=?')
+      .run(out.follow_up_at, out.follow_up_note || '', conv.id);
+  }
+
+  if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
+  else if (ready) flagHuman(conv.id, 'заявка готова — посчитать стоимость переезда');
+
+  let replies = [...(out.replies ?? [])];
+
+  // Цену называет менеджер, но модель иногда всё равно печатает сумму.
+  // Запредельные числа клиенту не отправляем: переезд не стоит сотен тысяч.
+  const MONEY = /(\d[\d\s.,]*\d|\d)\s*(₪|шек\w*|ils|nis|שקל|ש"ח)/gi;
+  const amount = (m) => Number(String(m).replace(/[^\d]/g, ''));
+  if (replies.some((r) => [...r.matchAll(MONEY)].some((m) => amount(m[1]) >= 100000))) {
+    flagHuman(conv.id, 'модель назвала подозрительную сумму — проверьте расчёт');
+    addMessage(conv.id, { direction: 'out', author: 'system', body: 'Ответ не отправлен: подозрительная сумма в тексте.', error: '1' });
+    emit('conversations', null);
+    emit('message', { conv_id: conv.id });
+    return;
+  }
+
+  // Страховка от повторов: модель иногда переспрашивает то же самое другими
+  // словами. Сравниваем с тем, что бот писал недавно, по «скелету» текста.
+  const skeleton = (t) => String(t).toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]/gu, '');
+  const said = db.prepare(`SELECT body FROM messages WHERE conv_id=? AND direction='out'
+    AND author='ai' ORDER BY id DESC LIMIT 3`).all(conv.id).map((m) => skeleton(m.body)).filter((x) => x.length > 12);
+  replies = replies.filter((r) => {
+    const k = skeleton(r);
+    if (k.length < 12) return true;
+    return !said.some((old) => old.includes(k) || k.includes(old));
+  });
+  if (!replies.length) return;
+
+  // первый наш ответ в диалоге предваряем приветствием с раскрытием ИИ:
+  // это требование правил WhatsApp, его нельзя оставлять на усмотрение модели
+  const alreadyWrote = db
+    .prepare("SELECT 1 FROM messages WHERE conv_id=? AND direction='out' AND author IN ('ai','human') LIMIT 1")
+    .get(conv.id);
+  if (!alreadyWrote) {
+    const greeting = pickGreeting(text);
+    if (greeting) replies.unshift(greeting);
+  }
+
+  // несколько коротких сообщений подряд — так пишут люди; между ними пауза,
+  // сама отправка уже показывает «печатает…»
+  for (const [i, body] of replies.entries()) {
+    if (i) await new Promise((r) => setTimeout(r, 700));
+    let wa = null, err = null;
+    try {
+      wa = (await adapterFor(fresh).send(fresh, body)).wa_id;
+    } catch (e) {
+      err = e.message;
+      flagHuman(conv.id, 'не отправилось в WhatsApp: ' + e.message);
+    }
+    const sent = addMessage(conv.id, { direction: 'out', author: 'ai', body, wa_id: wa, error: err });
+    emit('message', { conv_id: conv.id, message: sent });
+    if (err) break;
+  }
+  emit('conversations', null);
+}
+
+/**
+ * Ручной ответ оператора. По умолчанию забирает диалог себе (ИИ замолкает) —
+ * но иногда надо просто вставить реплику и оставить бота работать, для этого keepAi.
+ */
+/* ───── напоминания, дожим и подтверждение заказа ─────
+   Бот пишет первым только по делу: наступил день, о котором договорились,
+   клиент замолчал на середине разговора, или завтра к нему едет бригада.
+   Всё остальное время он молчит. Правила ритма — в followups.js. */
+const hoursSince = (sqlTime) => (Date.now() - new Date(String(sqlTime).replace(' ', 'T') + 'Z')) / 36e5;
+const todayLocal = () => new Intl.DateTimeFormat('sv-SE', { timeZone: scheduleSetting('timezone') }).format(new Date());
+const addDays = (iso, n) => {
+  const d = new Date(iso + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return new Intl.DateTimeFormat('sv-SE').format(d);
+};
+const recently = (sqlTime, hrs) => Boolean(sqlTime) && hoursSince(sqlTime) < hrs;
+const PER_RUN = 10;            // предохранитель: не заваливаем всех разом после перезапуска
+
+async function sendInitiative(conv, kind, extra = {}) {
+  const out = await generateReply(conv, history(conv.id), { nudge: { kind, ...extra } });
+  const text = (out.replies ?? [])[0];
+  if (!text) return false;
+  try {
+    const wa = (await adapterFor(conv).send(conv, text)).wa_id;
+    const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa, kind });
+    db.prepare("UPDATE conversations SET last_nudge_at = datetime('now') WHERE id=?").run(conv.id);
+    emit('message', { conv_id: conv.id, message: msg });
+    // на официальном API вне 24 часов бесплатно писать нельзя — пригодится при переходе
+    if (extra.outside) console.log(`[напоминание] диалог ${conv.id}: вне 24-часового окна`);
+    return true;
+  } catch (e) {
+    console.error('напоминание не ушло:', e.message);
+    return false;
+  }
+}
+
+export async function runFollowUps() {
+  if (getSetting('ai_global') !== '1') return;
+  const tz = scheduleSetting('timezone');
+  const today = todayLocal();
+  if (isHoliday(today)) return;
+
+  const hours = workHours()[new Date(today + 'T12:00:00Z').getUTCDay()];
+  if (!Array.isArray(hours)) return;                       // выходной — молчим
+  const nowHour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', hour12: false }).format(new Date()));
+  const [openHour, closeHour] = hours.map((h) => Number(String(h).slice(0, 2)));
+  if (nowHour >= closeHour) return;
+
+  const cfg = nudgeSettings();
+  const { eve, morning } = confirmHours();
+  const rows = db.prepare(`
+    SELECT c.*,
+      (SELECT direction FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_dir,
+      (SELECT status FROM messages m WHERE m.conv_id = c.id AND m.direction = 'out' ORDER BY m.id DESC LIMIT 1) AS last_status,
+      (SELECT max(created_at) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in') AS last_in_at,
+      (SELECT count(*) FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in' AND m.media IS NOT NULL) AS media_count
+    FROM conversations c
+    WHERE c.status != 'closed' AND c.nudge_stop = 0`).all();
+
+  let sent = 0, changed = false;
+  for (const conv of rows) {
+    if (sent >= PER_RUN) break;
+    try {
+      let lead = {};
+      try { lead = JSON.parse(conv.lead || '{}'); } catch {}
+      const silent = hoursSince(conv.last_at);
+      const sinceIn = conv.last_in_at ? hoursSince(conv.last_in_at) : silent;
+      const byManager = conv.ai_enabled !== 1 || conv.needs_human === 1;
+
+      // 1. Подтверждение заказа: накануне вечером и утром в день переезда
+      // напоминаем о визите только по заказам, которые менеджер подтвердил
+      if (cfg.confirmOn && /^\d{4}-\d{2}-\d{2}$/.test(conv.job_date || '')) {
+        const done = String(conv.confirm_sent || '');
+        const when = conv.job_date === addDays(today, 1) && nowHour >= eve && !done.includes('eve') ? 'eve'
+          : conv.job_date === today && nowHour >= morning && !done.includes('morning') ? 'morning' : '';
+        if (when) {
+          const mark = () => db.prepare('UPDATE conversations SET confirm_sent=? WHERE id=?')
+            .run(done ? `${done},${when}` : when, conv.id);
+          const who = lead.name || conv.name || `+${conv.phone}`;
+          const ok = byManager
+            // диалог ведёт человек — подтверждает он сам, бот не лезет в его переписку
+            ? await notifyManagers(`📅 ${when === 'eve' ? 'Завтра' : 'Сегодня'} переезд: ${who}`
+              + `${lead.district ? `, ${lead.district}` : ''}${conv.job_time ? `, ${conv.job_time}` : ''}`
+              + `\nПодтвердите с клиентом: ${adminLink(conv.id)}`)
+            : await sendInitiative(conv, 'confirm', { when, date: conv.job_date, time: conv.job_time || '', outside: sinceIn > 24 });
+          if (ok) { mark(); changed = true; if (!byManager) sent++; }
+          continue;
+        }
+      }
+
+      // 2. Диалог у менеджера: клиенту от бота не пишем, напоминаем менеджеру
+      if (byManager) {
+        if (conv.last_dir === 'out' && silent >= cfg.managerPing && !recently(conv.mgr_ping_at, 72)) {
+          const who = lead.name || conv.name || `+${conv.phone}`;
+          const ok = await notifyManagers(`⏳ Диалог молчит ${Math.round(silent)} ч — ${who}`
+            + `${lead.price_quote ? `, названа цена ${lead.price_quote}` : ''}\n${adminLink(conv.id)}`);
+          if (ok) {
+            db.prepare("UPDATE conversations SET mgr_ping_at = datetime('now') WHERE id=?").run(conv.id);
+            changed = true;
+          }
+        }
+        continue;
+      }
+
+      if (lead.stage === 'отказ') continue;                 // передумал — не преследуем
+      if (nowHour < openHour + 1) continue;                 // в первый час дня не начинаем
+
+      // 3. Напоминание по договорённости: «напишите после ремонта»
+      if (conv.followup_at && conv.followup_at <= today) {
+        if (await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: sinceIn > 24 })) {
+          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL, nudges=0 WHERE id=?').run(conv.id);
+          sent++; changed = true;
+        }
+        continue;
+      }
+
+      // 4. Дожим молчунов
+      if (!cfg.on || conv.last_dir !== 'out') continue;
+      const steps = cadence(lead);
+      const total = Math.min(cfg.max, steps.length);
+      if (conv.nudges >= total) continue;
+      if (silent > cfg.stale) continue;                     // через две недели это уже не дожим
+      if (recently(conv.last_nudge_at, 24)) continue;       // не больше одного письма в сутки
+      // разброс по минутам: иначе в начале дня уходит пачка и выглядит как рассылка
+      if (silent < steps[conv.nudges] + jitterMinutes(conv.id) / 60) continue;
+      // сообщение даже не доставлено — телефон выключен, дожимать бессмысленно
+      if (conv.last_status === 'sent' && silent < 48) continue;
+
+      const touch = conv.nudges + 1;
+      if (await sendInitiative(conv, 'nudge', {
+        touch, total, goal: touchGoal(touch, total),
+        missing: missingFor(lead, conv.media_count > 0),
+        seen: conv.last_status === 'read',
+        hours: Math.round(silent), outside: sinceIn > 24
+      })) {
+        db.prepare('UPDATE conversations SET nudges = nudges + 1 WHERE id=?').run(conv.id);
+        sent++; changed = true;
+      }
+    } catch (e) {
+      console.error('напоминания:', e.message);
+    }
+  }
+  if (changed) emit('conversations', null);
+}
+setInterval(runFollowUps, 6e5).unref?.();     // каждые 10 минут
+
+/**
+ * Неотвеченные сообщения. Ответ откладывается на несколько секунд, чтобы
+ * дождаться, пока клиент допишет очередь реплик, — и живёт этот таймер в памяти.
+ * Перезапуск (деплой, падение, переезд контейнера) его теряет: клиент написал и
+ * не получил ничего. Здесь подбираем такие диалоги и отвечаем с опозданием.
+ */
+export async function answerMissed() {
+  if (getSetting('ai_global') !== '1') return;
+  const rows = db.prepare(`
+    SELECT c.*, (SELECT body FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
+                 ORDER BY m.id DESC LIMIT 1) AS last_in_body
+    FROM conversations c
+    WHERE c.status != 'closed' AND c.ai_enabled = 1 AND c.needs_human = 0
+      AND EXISTS (
+        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.direction = 'in'
+          AND m.id > COALESCE((SELECT max(o.id) FROM messages o WHERE o.conv_id = c.id
+                AND o.direction = 'out' AND o.author IN ('ai','human')
+                AND (o.kind IS NULL OR o.kind <> 'interim')), 0)
+          -- свежие не трогаем: по ним ещё идёт обычная отложенная отправка
+          AND m.created_at <= datetime('now', '-3 minutes')
+          AND m.created_at >= datetime('now', '-12 hours'))
+    ORDER BY c.last_at DESC LIMIT 5`).all();
+
+  for (const conv of rows) {
+    console.log(`[догоняем] диалог ${conv.id}: клиент остался без ответа`);
+    try {
+      await respond(conv.id, channel, conv.last_in_body || '');
+    } catch (e) {
+      console.error('догоняющий ответ:', e.message);
+    }
+  }
+}
+setInterval(answerMissed, 3e5).unref?.();     // каждые 5 минут
+// после перезапуска отвечаем на то, что потерялось, не дожидаясь первого интервала
+setTimeout(answerMissed, 3e4).unref?.();
+
+// раз в час подчищаем заявки, по которым давно нет движения
+setInterval(() => {
+  const n = sweepStale();
+  if (n) emit('conversations', null);
+}, 36e5).unref?.();
+
+/**
+ * Черновик ответа для живого менеджера. Ничего не отправляет: менеджер
+ * читает, правит и решает сам. Работает и когда ИИ на диалоге выключен.
+ */
+export async function suggestReply(convId) {
+  const conv = getConversation(convId);
+  if (!conv) throw new Error('Диалог не найден');
+  const out = await generateReply(conv, history(convId));
+  return (out.replies ?? []).join('\n');
+}
+
+/** Последний сбой ИИ — чтобы админка не молчала, когда бот перестал отвечать. */
+export let lastAiError = null;
+export const clearAiError = () => { lastAiError = null; };
+
+export async function sendAsHuman(convId, text, keepAi = false) {
+  const conv = getConversation(convId);
+  if (!conv) throw new Error('Диалог не найден');
+  let wa = null, err = null;
+  try {
+    wa = (await adapterFor(conv).send(conv, text)).wa_id;
+  } catch (e) { err = e.message; }
+  const msg = addMessage(convId, { direction: 'out', author: 'human', body: text, wa_id: wa, error: err });
+  if (keepAi) {
+    db.prepare("UPDATE conversations SET needs_human=0, handoff_reason=NULL, unread=0, notified_at=NULL WHERE id=?").run(convId);
+  } else {
+    db.prepare("UPDATE conversations SET status='human', ai_enabled=0, needs_human=0, handoff_reason=NULL, unread=0, notified_at=NULL WHERE id=?").run(convId);
+  }
+  emit('message', { conv_id: convId, message: msg });
+  emit('conversations', null);
+  if (err) throw new Error(err);
+  return msg;
+}
