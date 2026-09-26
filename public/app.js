@@ -379,7 +379,7 @@ function renderDash() {
         <div class="panel-foot"><div class="stg">${s.by_stage.map(([n, v]) =>
           `<span><i style="background:${STAGE_COLOR[n] || 'var(--s1)'}"></i>${esc(n)} <b>${v}</b></span>`).join('')}
           <span><i style="background:var(--muted)"></i>закрыто <b>${s.closed}</b></span></div>
-          ${s.money ? `<div class="info"><span>Оценки бота</span><b>${s.money.quoted.sum.toLocaleString('ru-RU')} ₪ · ${s.money.quoted.n}</b></div>
+          ${s.money ? `<div class="info"><span>Названа цена</span><b>${s.money.quoted.sum.toLocaleString('ru-RU')} ₪ · ${s.money.quoted.n}</b></div>
             <div class="info"><span>Согласовано</span><b>${s.money.agreed.sum.toLocaleString('ru-RU')} ₪ · ${s.money.agreed.n}</b></div>
             <div class="info"><span>Оплачено</span><b>${s.money.paid.sum.toLocaleString('ru-RU')} ₪ · ${s.money.paid.n}</b></div>` : ''}
           ${s.nudges ? `<div class="info"><span>Напоминания</span><b>${s.nudges.sent} → ${s.nudges.replied} ответили${s.nudges.sent ? ` · ${Math.round(s.nudges.replied / s.nudges.sent * 100)}%` : ''}</b></div>` : ''}</div>
@@ -496,8 +496,8 @@ function jobHtml(j, i) {
     style="animation-delay:${i * 40}ms">
     <div class="jt">${ico(ICONS.time)}${esc(j.time || 'время не назначено')}${tag}</div>
     <b dir="auto">${esc(j.name || '+' + j.phone)}</b>
+    ${j.district ? `<div class="m route-line" dir="auto">${ico(ICONS.pin)}${esc(j.district)}</div>` : ''}
     <div class="m">${esc([j.service, j.area].filter(Boolean).join(' · '))}</div>
-    ${j.district ? `<div class="m" dir="auto">${ico(ICONS.pin)}${esc(j.district)}</div>` : ''}
     ${j.price ? `<span class="p">${esc(j.price)}</span>` : ''}
   </div>`;
 }
@@ -562,10 +562,53 @@ function waitHtml(c) {
   return `<span class="wait ${min >= 10 ? 'hot' : ''}">ждёт ${min < 60 ? min + ' мин' : Math.floor(min / 60) + ' ч'}</span>`;
 }
 
+/* ───── маршрут ─────
+   Для переезда «откуда → куда» это не два разных поля, а одна мысль: цену и
+   размер бригады решают именно концы маршрута — этаж и лифт на каждом из них.
+   Поэтому показываем их одним элементом везде: в карточке, на доске, в списке. */
+const liftLabel = (lift, floor) => lift === 'да' ? 'лифт'
+  : lift === 'нет' ? (floor ? `${floor} эт, без лифта` : 'без лифта')
+  : (floor ? `${floor} эт` : '');
+
+function routeHtml(l, compact = false) {
+  const ends = [
+    { city: l.from_city, addr: l.from_address, note: liftLabel(l.from_elevator, l.from_floor) },
+    { city: l.to_city, addr: l.to_address, note: liftLabel(l.to_elevator, l.to_floor) }
+  ];
+  if (!ends[0].city && !ends[1].city) return '';
+  const side = (e) => !e.city ? '<span class="rc muted">не назван</span>'
+    : `<span class="rc" dir="auto">${esc(e.city)}</span>${e.note ? `<span class="rn">${esc(e.note)}</span>` : ''}`;
+  return `<div class="route ${compact ? 'sm' : ''}">
+    <div class="rp">${side(ends[0])}</div>
+    <span class="rar">${ico('<path d="M5 12h14M13 6l6 6-6 6"/>')}</span>
+    <div class="rp">${side(ends[1])}</div>
+  </div>`;
+}
+
+/** Что влияет на бригаду и цену: коробки, упаковка, особые вещи. */
+function loadChips(l) {
+  const chips = [];
+  if (l.boxes) chips.push(`<span class="chip">${l.boxes === 'нет' ? 'без коробок' : esc(l.boxes) + ' коробок'}</span>`);
+  if (l.packing) chips.push(`<span class="chip ${l.packing === 'сам' ? '' : 'accent'}">${l.packing === 'сам' ? 'пакует сам' : esc(l.packing)}</span>`);
+  if (l.extras) chips.push(`<span class="chip warn" dir="auto">${esc(l.extras)}</span>`);
+  return chips.join('');
+}
+
+/** Один и тот же текст разными словами: «суть» от ИИ часто дословно повторяет список вещей. */
+const sameText = (a, b) => Boolean(a) && Boolean(b)
+  && String(a).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '') === String(b).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+
+/** Подпись под карточкой на доске. */
+function snippet(c, l) {
+  const body = c.summary || c.last_body || '';
+  return body ? `<div class="card-snip" dir="auto">${esc(body)}</div>` : '';
+}
+
 function cardHtml(c) {
   const l = lead(c);
-  const facts = [l.service, l.items, [l.from_city, l.to_city].filter(Boolean).join(' → '), l.date]
-    .filter(Boolean).map((f) => `<span class="fact">${esc(f)}</span>`).join('')
+  const facts = [l.service, l.date].filter(Boolean)
+    .map((f) => `<span class="fact">${esc(f)}</span>`).join('')
+    + loadChips(l)
     + (l.price_quote ? `<span class="fact price">${esc(l.price_quote)}</span>` : '');
   const thumbs = (c.thumbs || []).map((it, i) => {
     const tag = it.kind === 'video'
@@ -580,9 +623,10 @@ function cardHtml(c) {
       <div class="card-id"><b dir="auto">${esc(l.name || c.name || '+' + c.phone)}</b><span>+${esc(c.phone)}</span></div>
       ${c.unread ? `<span class="badge">${c.unread}</span>` : ''}
     </div>
+    ${routeHtml(l, true)}
     ${facts ? `<div class="facts">${facts}</div>` : ''}
     ${thumbs ? `<div class="card-thumbs">${thumbs}</div>` : ''}
-    <div class="card-snip" dir="auto">${esc(c.summary || c.last_body || '')}</div>
+    ${snippet(c, l)}
     <div class="card-foot">${chipFor(c)}${waitHtml(c)}
       <span class="t">${c.needs_human && c.last_in_at ? '' : ago(c.last_at)}</span></div>
   </div>`;
@@ -687,7 +731,8 @@ function rowHtml(c) {
         ${l.price_quote ? `<span class="lp">${esc(l.price_quote)}</span>` : ''}
         <span class="t">${ago(c.last_at)}</span>
       </div>
-      <div class="lsum" dir="auto">${esc(c.summary || c.last_body || '')}</div>
+      <div class="lsum" dir="auto">${(l.from_city || l.to_city)
+        ? `<b class="lroute">${esc([l.from_city || '?', l.to_city || '?'].join(' → '))}</b> · ` : ''}${esc(c.summary || c.last_body || '')}</div>
     </div>
   </div>`;
 }
@@ -879,10 +924,10 @@ async function send(root) {
 }
 
 /* ───── карточка заявки ───── */
-const LABELS = { service:'Тип переезда', items:'Вещи', rooms_count:'Комнат', boxes:'Коробок',
-  packing:'Упаковка', from_city:'Откуда', from_address:'Адрес откуда', from_elevator:'Лифт откуда',
-  from_floor:'Этаж откуда', to_city:'Куда', to_address:'Адрес куда', to_elevator:'Лифт куда',
-  to_floor:'Этаж куда', extras:'Особое', date:'Хочет переехать', price_quote:'Названа цена', stage:'Стадия' };
+// В карточке эти поля идут простыми строками. Маршрут, вещи, коробки, упаковка
+// и особые вещи показаны блоками выше — здесь их дублировать незачем.
+const LABELS = { service:'Тип переезда', rooms_count:'Комнат',
+  date:'Хочет переехать', price_quote:'Названа цена', stage:'Стадия' };
 
 // поля диалога, а не карточки: запись подтверждает человек, источник приходит с рекламы
 const CONV_KEYS = new Set(['job_date', 'job_time', 'source', 'deal_sum', 'paid_sum', 'paid_at',
@@ -949,6 +994,9 @@ function leadHtml(c) {
   const thumbs = photos.map((it) => it.kind === 'video'
     ? `<video src="/media/${esc(it.file)}" preload="metadata"></video>`
     : `<img src="/media/${esc(it.file)}" loading="lazy" alt="">`).join('');
+  const kv = (t, v) => v ? `<div class="kv"><dt>${t}</dt><dd dir="auto">${v}</dd></div>` : '';
+  const route = routeHtml(l);
+  const chips = loadChips(l);
   return `<div class="lead">
     <div class="lead-head"><h4>Заявка</h4><button class="btn ghost sm" data-a="lead-edit">Изменить</button></div>
     <div class="lead-acts">
@@ -957,18 +1005,16 @@ function leadHtml(c) {
     </div>
     <div class="kv"><dt>Колонка</dt><dd><select data-r="col">${COLUMNS.map((x) =>
       `<option value="${x.k}" ${columnOf(c) === x.k ? 'selected' : ''}>${x.t}</option>`).join('')}</select></dd></div>
-    <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
-    <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
     <div class="kv"><dt>Записан на</dt><dd>${c.job_date
       ? esc(c.job_date + (c.job_time ? ', ' + c.job_time : '')) + ' <span class="ok-tag">подтверждено</span>'
       : '<span class="muted">не записан — дату подтверждает менеджер</span>'}</dd></div>
-    ${c.source ? `<div class="kv"><dt>Источник</dt><dd dir="auto">${c.source_url
-      ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source)}</a>` : esc(c.source)}${
-      c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
-    ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
-    ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
-    <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
-    ${rows || '<div class="empty" style="padding:24px 0">ИИ ещё не собрал данные</div>'}
+    ${route ? `<div class="sect"><h4>Маршрут</h4>${route}
+      ${[l.from_address, l.to_address].some(Boolean) ? `<div class="radr" dir="auto">
+        <span>${esc(l.from_address || '—')}</span><span>${esc(l.to_address || '—')}</span></div>` : ''}</div>` : ''}
+    ${(l.items || chips) ? `<div class="sect"><h4>Что везём</h4>
+      ${l.items ? `<div class="quote" dir="auto">${esc(l.items)}</div>` : ''}
+      ${chips ? `<div class="facts">${chips}</div>` : ''}</div>` : ''}
+    ${rows || (route ? '' : '<div class="empty" style="padding:24px 0">ИИ ещё не собрал данные</div>')}
     ${(c.deal_sum || c.paid_sum) ? `<div class="sect"><h4>Деньги</h4><div class="calc">
         ${lead(c).price_quote ? `<div class="l"><span>названа цена</span><span>${esc(lead(c).price_quote)}</span></div>` : ''}
         ${c.deal_sum ? `<div class="l"><span>согласовано</span><span>${c.deal_sum.toLocaleString('ru-RU')} ₪</span></div>` : ''}
@@ -976,7 +1022,17 @@ function leadHtml(c) {
       </div></div>` : ''}
     ${thumbs ? `<div class="sect"><h4>Фото от клиента (${photos.length})</h4><div class="thumbs">${thumbs}</div></div>` : ''}
     ${rooms ? `<div class="sect"><h4>Что видно на фото</h4>${rooms}</div>` : ''}
-    ${c.summary ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
+    ${(c.summary && !sameText(c.summary, l.items)) ? `<div class="sect"><h4>Суть</h4><div class="quote" dir="auto">${esc(c.summary)}</div></div>` : ''}
+    <div class="sect"><h4>Клиент</h4>
+      <div class="kv"><dt>Телефон</dt><dd>+${esc(c.phone)}</dd></div>
+      <div class="kv"><dt>Имя</dt><dd dir="auto">${esc(l.name || c.name || '—')}</dd></div>
+      ${c.source ? `<div class="kv"><dt>Источник</dt><dd dir="auto">${c.source_url
+        ? `<a href="${esc(c.source_url)}" target="_blank" rel="noopener">${esc(c.source)}</a>` : esc(c.source)}${
+        c.source_title ? ` · ${esc(c.source_title)}` : ''}</dd></div>` : ''}
+      ${c.followup_at ? `<div class="kv"><dt>Напомнить</dt><dd>${esc(c.followup_at)}${c.followup_note ? ' · ' + esc(c.followup_note) : ''}</dd></div>` : ''}
+      ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
+      <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
+    </div>
     <div class="sect note"><h4>Заметка менеджера</h4>
       <textarea data-r="note" dir="auto" placeholder="Видна только вам, клиенту не уходит">${esc(c.note || '')}</textarea></div>
   </div>`;

@@ -293,6 +293,26 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .srcrow b{font-weight:600;font-size:13px}
 .srcrow small{display:block;color:var(--muted);font-size:11px;word-break:break-all}
 .srcrow .n{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+/* маршрут переезда: два конца и стрелка между ними */
+.route{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:8px;
+  padding:9px 11px;border:var(--hair) solid var(--border);border-radius:var(--r-md);background:var(--surface-2)}
+.route .rp{display:flex;flex-direction:column;gap:2px;min-width:0}
+.route .rc{font-weight:560;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.route .rn{font-size:11px;color:var(--muted);line-height:1.3;overflow:hidden;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.route .rar{color:var(--muted);display:grid;place-items:center}
+.route .rar svg{width:16px;height:16px}
+.route.sm{padding:7px 9px;background:transparent;border-style:dashed}
+.route.sm .rc{font-size:12.5px}
+.radr{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px;font-size:11.5px;color:var(--muted)}
+.radr span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* коробки, упаковка, особые вещи — то, что меняет бригаду и цену */
+.chip{font-size:11.5px;padding:3px 8px;border-radius:7px;background:var(--surface-2);color:var(--text-2);
+  border:var(--hair) solid var(--border);white-space:nowrap}
+.chip.accent{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.chip.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.job .route-line{color:var(--text-2);font-weight:560}
+.lroute{color:var(--text-2);font-weight:560}
 .ok-tag{font-size:11px;color:var(--s3);background:color-mix(in srgb,var(--s3) 12%,transparent);padding:1px 6px;border-radius:6px;white-space:nowrap}
 .kv dd .muted{color:var(--muted)}
 .panels.top{grid-template-columns:minmax(0,1.7fr) minmax(0,1fr)}
@@ -429,7 +449,7 @@ header .sub{color:var(--muted);font-size:12.5px;margin-top:2px;letter-spacing:0}
 .card-snip{font-size:12.5px;color:var(--text-2);margin-top:8px;line-height:1.5;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .facts{display:flex;flex-wrap:wrap;gap:5px;margin-top:9px}
-.fact{font-size:11.5px;background:var(--surface-2);border:var(--hair) solid var(--border-soft);border-radius:6px;
+.fact{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;background:var(--surface-2);border:var(--hair) solid var(--border-soft);border-radius:6px;
   padding:2px 7px;color:var(--text-2);white-space:nowrap}
 .fact.price{background:var(--gold-soft);border-color:color-mix(in srgb,var(--gold) 30%,transparent);color:var(--gold);font-weight:450}
 .card-foot{display:flex;align-items:center;gap:7px;margin-top:11px;padding-top:10px;
