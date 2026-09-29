@@ -97,8 +97,15 @@ if (!cols.includes('source_url')) db.exec('ALTER TABLE conversations ADD COLUMN 
 if (!cols.includes('source_ref')) db.exec('ALTER TABLE conversations ADD COLUMN source_ref TEXT');
 // весь ответ рекламной площадки целиком: по нему видно, что вообще прислала Meta
 if (!cols.includes('source_raw')) db.exec('ALTER TABLE conversations ADD COLUMN source_raw TEXT');
-// Деньги в трёх состояниях. Оценка бота живёт в карточке (lead.price_quote) и
-// точной не является; согласованную сумму и оплату проставляет человек —
+// Архив делится на корзины: свои сотрудники, «не сейчас, но лид живой» и отказ.
+// Одной кучей «закрыто» пользоваться нельзя — там вперемешку и коллеги, и клиенты.
+if (!cols.includes('archive')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN archive TEXT');
+  // что уже закрыто, кладём в «отказ»: разобрать по корзинам можно перетаскиванием
+  db.exec("UPDATE conversations SET archive='refused' WHERE status='closed'");
+}
+// Деньги в трёх состояниях. Названная в переписке цена живёт в карточке
+// (lead.price_quote) и точной не является; согласованную сумму и оплату проставляет человек —
 // иначе в отчёте «средний чек» считается по цифрам, которые никто не подтверждал.
 if (!cols.includes('deal_sum')) db.exec('ALTER TABLE conversations ADD COLUMN deal_sum INTEGER');
 if (!cols.includes('paid_sum')) db.exec('ALTER TABLE conversations ADD COLUMN paid_sum INTEGER');
@@ -304,6 +311,10 @@ for (const [key, value] of Object.entries(FRESH)) {
     db.prepare('UPDATE settings SET value=? WHERE key=?').run(value, key);
   }
 }
+
+// Закрытая заявка никого не ждёт: флаг «нужен человек» на ней — след прошлого,
+// из-за которого в архиве висело «ждёт 15 ч». Дёшево и идемпотентно.
+db.exec("UPDATE conversations SET needs_human=0 WHERE status='closed' AND needs_human=1");
 
 export const getSetting = (k) =>
   db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value ?? null;
