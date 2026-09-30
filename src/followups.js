@@ -34,7 +34,8 @@ export function missingFor(lead = {}, hasMedia = false) {
   // этаж спрашиваем только там, где лифта нет
   if (lead.from_elevator === 'нет' && !lead.from_floor) gaps.push('этаж на первом адресе');
   if (lead.to_elevator === 'нет' && !lead.to_floor) gaps.push('этаж на втором адресе');
-  if (!lead.packing) gaps.push('нужна ли упаковка');
+  // коробок не будет — упаковывать нечего, этот пункт не считается пробелом
+  if (!lead.packing && lead.boxes !== 'нет') gaps.push('нужна ли упаковка');
   if (!lead.date && !lead.date_iso) gaps.push('когда переезд');
   return gaps;
 }
