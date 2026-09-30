@@ -71,6 +71,12 @@ const count = (value) => {
   return yesNo(v) === 'нет' ? 'нет' : String(value).trim();
 };
 
+// Подвал — это минус первый этаж, и лифт туда не идёт. Бот про лифт не
+// спрашивает, но модель иногда оставляет поле пустым — дозаполняем кодом,
+// иначе дожим будет считать, что в заявке дыра.
+const BASEMENT = ['подвал', 'цоколь', 'מרתף', 'basement', 'cellar'];
+const isBasement = (floor) => BASEMENT.some((w) => clean(floor).includes(clean(w)));
+
 /** Карточка после модели: непонятные значения обнуляем, но не роняем ответ. */
 export function normalizeLead(lead = {}) {
   const out = { ...lead };
@@ -85,6 +91,8 @@ export function normalizeLead(lead = {}) {
   // рядом с «лифт есть», и грузчики закладывают лишних людей и время.
   if (out.from_elevator === 'да') out.from_floor = '';
   if (out.to_elevator === 'да') out.to_floor = '';
+  if (isBasement(lead.from_floor) && !out.from_elevator) out.from_elevator = 'нет';
+  if (isBasement(lead.to_floor) && !out.to_elevator) out.to_elevator = 'нет';
 
   // дата в карточке — либо настоящая ГГГГ-ММ-ДД, либо ничего: по ней строится расписание
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(out.date_iso ?? ''))) out.date_iso = '';
