@@ -521,7 +521,18 @@ export async function runFollowUps() {
       if (lead.stage === 'отказ') continue;                 // передумал — не преследуем
       if (nowHour < openHour + 1) continue;                 // в первый час дня не начинаем
 
-      // 3. Напоминание по договорённости: «напишите после ремонта»
+      // 3. Напоминание по договорённости
+      if (conv.followup_at && conv.followup_at <= today && conv.followup_who === 'manager') {
+        // менеджер просил напомнить себе — клиенту бот в этот день не пишет
+        const who = lead.name || conv.name || `+${conv.phone}`;
+        const ok = await notifyManagers(`🔔 Сегодня напомнить: ${who}`
+          + `${conv.followup_note ? `\n${conv.followup_note}` : ''}\n${adminLink(conv.id)}`);
+        if (ok) {
+          db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
+          changed = true;
+        }
+        continue;
+      }
       if (conv.followup_at && conv.followup_at <= today) {
         if (await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: sinceIn > 24 })) {
           db.prepare('UPDATE conversations SET followup_at=NULL, followup_note=NULL, nudges=0 WHERE id=?').run(conv.id);

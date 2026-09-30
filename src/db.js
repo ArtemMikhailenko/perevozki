@@ -80,6 +80,8 @@ if (!cols.includes('notified_at')) db.exec('ALTER TABLE conversations ADD COLUMN
 // напоминания: когда написать («клиент просил после ремонта») и сколько дожимов уже ушло
 if (!cols.includes('followup_at')) db.exec('ALTER TABLE conversations ADD COLUMN followup_at TEXT');
 if (!cols.includes('followup_note')) db.exec('ALTER TABLE conversations ADD COLUMN followup_note TEXT');
+// «перезвонить 15.10» — это задача человеку, а не повод боту написать клиенту
+if (!cols.includes('followup_who')) db.exec('ALTER TABLE conversations ADD COLUMN followup_who TEXT');
 if (!cols.includes('nudges')) db.exec('ALTER TABLE conversations ADD COLUMN nudges INTEGER NOT NULL DEFAULT 0');
 // клиент попросил не писать — больше никаких напоминаний по своей инициативе
 if (!cols.includes('nudge_stop')) db.exec('ALTER TABLE conversations ADD COLUMN nudge_stop INTEGER NOT NULL DEFAULT 0');

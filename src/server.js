@@ -330,6 +330,11 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ error: 'Дата оплаты — ГГГГ-ММ-ДД' });
     db.prepare('UPDATE conversations SET paid_at=? WHERE id=?').run(d || null, id);
   }
+  // Кому напоминание: бот напишет клиенту или менеджеру придёт «сегодня перезвонить»
+  if ('followup_who' in req.body) {
+    const w = String(req.body.followup_who ?? '').trim();
+    db.prepare('UPDATE conversations SET followup_who=? WHERE id=?').run(w === 'manager' ? 'manager' : null, id);
+  }
   // Напоминание можно поправить руками: клиент позвонил и перенёс сроки,
   // а бот об этом не знает — в переписке этого не было.
   if ('followup_at' in req.body || 'followup_note' in req.body) {
