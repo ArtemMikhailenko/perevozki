@@ -259,14 +259,14 @@ stage: «уточняем», пока собираешь; «ждём списо�
 const seed = db.prepare('INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)');
 seed.run('system_prompt', DEFAULT_PROMPT);
 seed.run('ai_global', '1');
-// Раскрытие ИИ обязательно: правила WhatsApp и Anthropic требуют сказать об этом
-// хотя бы в начале диалога. Модель про него иногда «забывает» ради краткости,
-// поэтому приветствие шлёт код. {company} — название компании из настроек.
+// Приветствие шлёт код, а не модель: она его иногда «забывает» ради краткости.
+// По решению компании бот не называет себя виртуальным в приветствии; если клиент
+// спросит прямо, бот честно скажет, что он ИИ (правило в промпте). {company} — из настроек.
 const DEFAULT_GREETING = [
-  'ru: Здравствуйте! Я Майя, виртуальная помощница. Помогу с вашим переездом.',
-  'he: שלום! כאן מאיה, העוזרת הווירטואלית אשמח לעזור בנושא ההובלה שלך',
-  "en: Hi! I'm Maya, the virtual assistant. Happy to help with your move.",
-  'uk: Вітаю! Я Майя, віртуальна помічниця. Допоможу з вашим переїздом.'
+  'ru: Здравствуйте! Я Майя, помогу с вашим переездом.',
+  'he: שלום! כאן מאיה, אשמח לעזור בנושא ההובלה שלך',
+  "en: Hi! I'm Maya, happy to help with your move.",
+  'uk: Вітаю! Я Майя, допоможу з вашим переїздом.'
 ].join('\n');
 seed.run('greeting', DEFAULT_GREETING);
 seed.run('business_hours', '');
@@ -349,7 +349,7 @@ seed.run('quick_replies', DEFAULT_QUICK);
 const LEGACY = {
   system_prompt: ['1b453a867914c37f', '3ef3f8698746ef82', 'adc2feb61350df07', '8307ea3d0970045f',
     '5f4b795ba4e4c687', 'f88851db9fb0f5fd', 'efb88b28b8f386fa'],
-  greeting: ['c351e74f95b6f547'],
+  greeting: ['c351e74f95b6f547', 'ca7b7212d8125008'],
   business_facts: [],
   quick_replies: []
 };
