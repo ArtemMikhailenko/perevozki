@@ -121,6 +121,11 @@ async function toTurns(messages) {
           text = (text ? text + '\n' : '') + `[клиент прислал видео. Служебный разбор по-русски: ${bits}]`;
           continue;
         }
+        // файл, который менеджер отправил клиенту (гарантия, договор), — не фото клиента
+        if (m.direction === 'out') {
+          text = (text ? text + '\n' : '') + `[менеджер отправил клиенту файл «${item.name || item.kind}»]`;
+          continue;
+        }
         const kind = item.kind === 'video' ? 'видео' : item.kind === 'audio' ? 'голосовое' : 'фото';
         const imgs = withImages.has(m.id) && sent < MAX_FRAMES
           ? (await asImages(item)).slice(0, MAX_FRAMES - sent) : [];
@@ -133,6 +138,10 @@ async function toTurns(messages) {
         text = (text ? text + '\n' : '') + note;
       }
     }
+
+    // пустое сообщение (реакция, стикер, клик по рекламе без текста) модель не принимает:
+    // «user messages must have non-empty content» — и весь ответ клиенту падает
+    if (!String(text ?? '').trim() && !images.length) continue;
 
     const prev = turns.at(-1);
     if (prev?.role === role && !images.length && !prev.images?.length) {

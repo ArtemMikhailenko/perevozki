@@ -650,6 +650,25 @@ export async function suggestReply(convId) {
 export let lastAiError = null;
 export const clearAiError = () => { lastAiError = null; };
 
+/** Менеджер отправил клиенту файл (гарантия, договор, памятка). */
+export async function sendFileAsHuman(convId, item, caption = '', keepAi = false) {
+  const conv = getConversation(convId);
+  if (!conv) throw new Error('Диалог не найден');
+  const ad = adapterFor(conv);
+  if (!ad.sendFile) throw new Error('Отправка файлов работает только при подключении WhatsApp по QR');
+  let wa = null, err = null;
+  try { wa = (await ad.sendFile(conv, item, caption)).wa_id; } catch (e) { err = e.message; }
+  const msg = addMessage(convId, { direction: 'out', author: 'human', body: caption || '', wa_id: wa, error: err, media: [item] });
+  db.prepare(keepAi
+    ? 'UPDATE conversations SET unread=0 WHERE id=?'
+    : "UPDATE conversations SET status='human', ai_enabled=0, needs_human=0, handoff_reason=NULL, unread=0, notified_at=NULL WHERE id=?")
+    .run(convId);
+  emit('message', { conv_id: convId, message: msg });
+  emit('conversations', null);
+  if (err) throw new Error(err);
+  return msg;
+}
+
 export async function sendAsHuman(convId, text, keepAi = false) {
   const conv = getConversation(convId);
   if (!conv) throw new Error('Диалог не найден');

@@ -1,7 +1,8 @@
 import express from 'express';
 import path from 'node:path';
 import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
-import { handleIncoming, sendAsHuman, suggestReply, subscribe, emit } from './bot.js';
+import { handleIncoming, sendAsHuman, sendFileAsHuman, suggestReply, subscribe, emit } from './bot.js';
+import { saveUpload, listDocs, addDoc, deleteDoc, docItem, MAX_MB } from './files.js';
 import * as botState from './bot.js';
 import { channel, channels } from './channels/index.js';
 import { saveMedia } from './media.js';
@@ -457,6 +458,28 @@ app.post('/api/conversations/:id/read', (req, res) => {
   emit('conversations', null);
   res.json({ ok: true });
 });
+
+/* Файлы клиенту: загрузка сырым телом (имя — в заголовке), затем отправка */
+const rawUpload = express.raw({ type: () => true, limit: `${MAX_MB + 5}mb` });
+const fileName = (req) => { try { return decodeURIComponent(String(req.headers['x-filename'] || '')); } catch { return 'файл'; } };
+app.post('/api/upload', rawUpload, (req, res) => {
+  try { res.json(saveUpload(req.body, req.headers['content-type'], fileName(req))); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/conversations/:id/send-file', async (req, res) => {
+  const b = req.body || {};
+  try {
+    const item = b.doc_id ? docItem(Number(b.doc_id)) : b.item;
+    if (!item?.file) throw new Error('Нет файла');
+    res.json(await sendFileAsHuman(Number(req.params.id), item, String(b.caption || '').trim(), Boolean(b.keep_ai)));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+app.get('/api/docs', (req, res) => res.json(listDocs()));
+app.post('/api/docs', rawUpload, (req, res) => {
+  try { res.json(addDoc(saveUpload(req.body, req.headers['content-type'], fileName(req)))); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.delete('/api/docs/:id', (req, res) => { deleteDoc(Number(req.params.id)); res.json({ ok: true }); });
 
 app.post('/api/conversations/:id/send', async (req, res) => {
   const text = String(req.body.text || '').trim();

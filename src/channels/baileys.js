@@ -13,7 +13,7 @@ import makeWASocket, {
 import QRCode from 'qrcode';
 import path from 'node:path';
 import fs from 'node:fs';
-import { saveMedia } from '../media.js';
+import { saveMedia, mediaPath } from '../media.js';
 import { setMessageStatus } from '../db.js';
 
 let sock = null;
@@ -299,6 +299,19 @@ export const baileys = {
     } catch {}
     const res = await sock.sendMessage(jid, { text });
     if (res?.key?.id) sentIds.add(res.key.id);              // чтобы не зациклиться в чате с собой
+    return { wa_id: res?.key?.id ?? null };
+  },
+
+  /** Файл менеджера клиенту: фото и видео — как медиа, остальное — документом с именем. */
+  async sendFile(conv, item, caption = '') {
+    if (!sock || status.state !== 'online') throw new Error('WhatsApp не подключён (состояние: ' + status.state + ')');
+    const jid = conv.chat_id || `${String(conv.phone).replace(/\D/g, '')}@s.whatsapp.net`;
+    const url = { url: mediaPath(item.file) };
+    const msg = item.kind === 'image' ? { image: url, caption: caption || undefined }
+      : item.kind === 'video' ? { video: url, caption: caption || undefined }
+      : { document: url, mimetype: item.mime || 'application/octet-stream', fileName: item.name, caption: caption || undefined };
+    const res = await sock.sendMessage(jid, msg);
+    if (res?.key?.id) sentIds.add(res.key.id);
     return { wa_id: res?.key?.id ?? null };
   },
 

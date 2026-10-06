@@ -870,7 +870,14 @@ function moveSel(step) {
 function mediaHtml(m) {
   const items = m.media ? JSON.parse(m.media) : [];
   if (!items.length) return '';
-  return `<div class="imgs ${items.length === 1 ? 'one' : ''}">` + items.map((it) => it.kind === 'video'
+  // документы (гарантия, договор) — отдельной строкой с именем, а не картинкой
+  const docs = items.filter((it) => it.kind === 'document');
+  const media = items.filter((it) => it.kind !== 'document');
+  const docHtml = docs.map((it) => `<a class="doc" href="/media/${esc(it.file)}" target="_blank" rel="noopener" download="${esc(it.name || it.file)}">
+      <span class="doc-ic">${esc((String(it.name || '').split('.').pop() || 'файл').slice(0, 4).toUpperCase())}</span>
+      <span class="doc-n" dir="auto">${esc(it.name || 'файл')}</span></a>`).join('');
+  if (!media.length) return docHtml;
+  return docHtml + `<div class="imgs ${media.length === 1 ? 'one' : ''}">` + media.map((it) => it.kind === 'video'
     ? `<video src="/media/${esc(it.file)}" controls preload="metadata"></video>`
     : it.kind === 'audio'
       ? `<audio src="/media/${esc(it.file)}" controls preload="metadata"></audio>`
@@ -893,6 +900,8 @@ function chatHtml(c) {
       <div class="composer-side">
         <label class="switch"><input type="checkbox" data-r="keep"><span>не выключать ИИ</span></label>
         <div style="display:flex;gap:7px">
+          <button class="btn" data-a="file" title="Отправить файл: гарантию, договор, фото">📎 Файл</button>
+          <input type="file" data-r="file" hidden>
           <button class="btn" data-a="qr" title="Заготовки ответов — клавиша /">Шаблоны</button>
           <button class="btn" data-a="suggest" title="ИИ напишет черновик, отправите сами">Подсказать</button>
           <button class="btn primary" data-a="send">Отправить</button>
@@ -959,6 +968,51 @@ function bindChat(root) {
     $$('div[data-t]', el).forEach((d) => d.onclick = () => { inp.value = d.dataset.t; closeQr(); inp.focus(); });
   }
   q('[data-a="qr"]').onclick = () => (root.querySelector('.qr') ? closeQr() : openQr());
+
+  /* Файлы клиенту: из библиотеки одним нажатием или с компьютера/телефона.
+     Текст из поля ответа уходит подписью к файлу. */
+  const fileInp = q('[data-r="file"]');
+  const sendFile = async (body, label) => {
+    const btn = q('[data-a="file"]');
+    btn.disabled = true; btn.textContent = 'Отправляем…';
+    try {
+      await api(`/api/conversations/${c.id}/send-file`, { method: 'POST', body: JSON.stringify({
+        ...body, caption: inp.value.trim(), keep_ai: root.querySelector('[data-r="keep"]').checked }) });
+      inp.value = '';
+      toast(`Отправлено: ${label}`);
+    } catch (err) { toast('Не отправилось: ' + err.message, true); }
+    btn.disabled = false; btn.textContent = '📎 Файл';
+    openConv(current, drawerOpen);
+  };
+  fileInp.onchange = async () => {
+    const f = fileInp.files[0];
+    fileInp.value = '';
+    if (!f) return;
+    try {
+      const r = await fetch('/api/upload', { method: 'POST', body: f,
+        headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name) } });
+      const item = await r.json();
+      if (!r.ok) throw new Error(item.error || 'не загрузился');
+      await sendFile({ item }, f.name);
+    } catch (err) { toast('Файл не загрузился: ' + err.message, true); }
+  };
+  q('[data-a="file"]').onclick = async (e) => {
+    const old = root.querySelector('.filemenu');
+    if (old) return old.remove();
+    const docs = await api('/api/docs').catch(() => []);
+    if (!docs.length) return fileInp.click();
+    const menu = document.createElement('div');
+    menu.className = 'qr filemenu';
+    menu.innerHTML = '<div class="hint">Отправить клиенту</div>'
+      + docs.map((d) => `<div data-doc="${d.id}">📄 ${esc(d.name)}</div>`).join('')
+      + '<div data-up="1">⬆ Другой файл с устройства…</div>';
+    root.querySelector('.composer').appendChild(menu);
+    $$('[data-doc]', menu).forEach((d) => d.onclick = () => { menu.remove(); sendFile({ doc_id: Number(d.dataset.doc) }, d.textContent.slice(3)); });
+    menu.querySelector('[data-up]').onclick = () => { menu.remove(); fileInp.click(); };
+    setTimeout(() => document.addEventListener('click', function off(ev) {
+      if (!menu.contains(ev.target) && ev.target !== e.target) { menu.remove(); document.removeEventListener('click', off); }
+    }), 0);
+  };
   inp.addEventListener('keydown', (e) => {
     const box = root.querySelector('.qr');
     if (e.key === '/' && !inp.value) { e.preventDefault(); openQr(); return; }
@@ -992,6 +1046,33 @@ function bindChat(root) {
   };
   inp.focus();
 }
+async function loadDocs() {
+  const box = $('#f-docs');
+  const docs = await api('/api/docs').catch(() => []);
+  const size = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' МБ' : Math.ceil(n / 1024) + ' КБ');
+  box.innerHTML = (docs.length ? docs.map((d) => `<div class="doc-row"><a class="doc" href="/media/${esc(d.file)}" target="_blank" rel="noopener">
+      <span class="doc-ic">${esc((d.name.split('.').pop() || '').slice(0, 4).toUpperCase())}</span><span class="doc-n" dir="auto">${esc(d.name)}</span></a>
+      <span class="muted">${size(d.size || 0)}</span><button class="btn ghost sm" data-deldoc="${d.id}">Удалить</button></div>`).join('')
+    : '<div class="muted">Файлов пока нет</div>')
+    + '<label class="btn" style="margin-top:10px;display:inline-flex">⬆ Добавить файл<input type="file" id="f-docup" hidden></label>';
+  $('#f-docup').onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const r = await fetch('/api/docs', { method: 'POST', body: f,
+      headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name) } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) toast(j.error || 'Не загрузился', true); else toast('Файл добавлен');
+    loadDocs();
+  };
+  $$('[data-deldoc]', box).forEach((b) => b.onclick = async () => {
+    await api(`/api/docs/${b.dataset.deldoc}`, { method: 'DELETE' });
+    loadDocs();
+  });
+  // загрузка файла не относится к общей кнопке «Сохранить»
+  box.addEventListener('input', (e) => e.stopPropagation());
+  box.addEventListener('change', (e) => e.stopPropagation());
+}
+
 async function setMode(ai) {
   await api(`/api/conversations/${current}/mode`, { method: 'POST', body: JSON.stringify({ ai_enabled: ai }) });
   openConv(current, drawerOpen);
@@ -1351,9 +1432,11 @@ function renderSettings() {
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
     replies: {
-      lead: 'Готовые фразы для менеджера. В чате — кнопка «Шаблоны» или клавиша «/» в пустом поле ответа.',
+      lead: 'Готовые фразы и файлы для менеджера. В чате — кнопки «Шаблоны» и «📎 Файл».',
       body: grp('Заготовки', `${quick} ${plural(quick, 'заготовка', 'заготовки', 'заготовок')} · по строке на каждую`,
         swide(`<textarea id="f-quick" dir="auto" rows="12">${esc(s.quick_replies || '')}</textarea>`))
+        + grp('Файлы для клиентов', 'Гарантия, договор, памятка о переезде — то, что отправляете каждому клиенту. В чате они появятся в меню «📎 Файл», отправка одним нажатием.',
+          '<div id="f-docs" class="docs-lib">загружаем…</div>')
     },
     hours: {
       lead: `Бот работает круглосуточно, живой менеджер — нет. Этот график бот называет клиентам.
@@ -1441,6 +1524,7 @@ function renderSettings() {
   });
   $('.set-body').addEventListener('input', () => setDirty(true));
   if ($('#f-hours')) renderHourRows(state.work_hours || {});
+  if ($('#f-docs')) loadDocs();
   $$('.opt').forEach((o) => o.onclick = () => {
     $$('.opt').forEach((x) => x.classList.toggle('on', x === o));
     $('#f-off').value = o.dataset.v;

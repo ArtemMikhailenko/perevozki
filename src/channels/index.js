@@ -10,6 +10,9 @@ const mock = {
   async send() {
     return { wa_id: 'mock-' + Date.now() };
   },
+  async sendFile() {
+    return { wa_id: 'mock-file-' + Date.now() };
+  },
   parse(body) {
     if (!body?.from || !body?.text) return [];
     return [{ phone: String(body.from), name: body.name || null, text: String(body.text),
