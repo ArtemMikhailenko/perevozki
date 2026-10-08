@@ -316,6 +316,19 @@ seed.run('confirm_eve_hour', '18');
 seed.run('confirm_morning_hour', '8');
 // Диалоги, которые ведёт менеджер, бот не дожимает — напоминает самому менеджеру
 seed.run('manager_ping_hours', '48');
+// Отказ — не навсегда: через N месяцев бот сам спросит, актуален ли переезд
+seed.run('revive_on', '1');
+seed.run('revive_months', '10');
+// номера сотрудников: их чаты видны в CRM, в колонке «Сотрудники», но бот им не отвечает
+seed.run('staff_numbers', '');
+// заявки, которые уже лежали в «Отказе», получают напоминание от даты последнего сообщения
+if (!db.prepare("SELECT 1 FROM settings WHERE key='revive_backfilled'").get()) {
+  const n = db.prepare(`UPDATE conversations SET followup_at=date(last_at, '+10 months'), followup_who='revive',
+      followup_note='прошлое обращение — узнать, актуален ли переезд'
+    WHERE archive='refused' AND followup_at IS NULL AND nudge_stop=0`).run().changes;
+  db.prepare("INSERT INTO settings(key,value) VALUES('revive_backfilled','1')").run();
+  if (n) console.log(`Напоминание через 10 месяцев поставлено ${n} заявкам из «Отказа»`);
+}
 seed.run('stop_words', [
   'не пишите', 'не пиши', 'не писать', 'отпишитесь', 'отписаться', 'хватит писать',
   'перестаньте писать', 'не беспокойте', 'не турбуйте', 'stop', 'unsubscribe',

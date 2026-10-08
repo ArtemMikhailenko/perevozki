@@ -1428,6 +1428,9 @@ function renderSettings() {
           + srow('В день переезда, в котором часу', '', unit('f-confirmmorning', s.confirm_morning_hour ?? 8, 'часов', 6, 12))
           + srow('Напомнить менеджеру о тихом диалоге', 'Диалоги, которые ведёт человек, бот не дожимает — вместо этого пишет менеджеру.',
             unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
+        + grp('Вернуться к клиенту после отказа', 'Заявку перенесли в «Отказ» — через несколько месяцев бот сам напишет клиенту: напомнит о прошлом обращении и спросит, актуален ли переезд. Дата видна в карточке в блоке «Напомнить», её можно поменять или убрать.',
+          srow('Возвращаться к отказавшимся', '', `<label class="switch"><input type="checkbox" id="f-reviveon" ${s.revive_on ? 'checked' : ''}></label>`)
+          + srow('Через сколько месяцев', '', unit('f-revivem', s.revive_months ?? 10, 'мес.', 1, 36)))
         + grp('Промпт', 'Роль, стиль речи, что собирать по заявке, когда звать человека. Цены сюда не вписывайте — они в прайсе.',
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
@@ -1460,7 +1463,9 @@ function renderSettings() {
     access: {
       lead: 'Кому бот отвечает автоматически и как админка зовёт менеджера.',
       body: grp('', '',
-        srow('Чёрный список', 'Номера, которым бот не отвечает и которые не попадают в заявки: личные контакты, сотрудники, спам. По одному на строку или через запятую, в любом формате — «050-123-4567» или «+972 50 123 4567». Всем остальным бот отвечает.',
+        srow('Сотрудники', 'Номера работников и своих людей. Их чаты видны в CRM, в архиве в колонке «Сотрудники», но бот им не отвечает и менеджеров не зовёт. Чат можно и просто перетащить в эту колонку — бот там тоже молчит.',
+          `<textarea id="f-staff" class="mono" rows="4" placeholder="+972 50 123 4567">${esc(s.staff_numbers || '')}</textarea>`)
+        + srow('Чёрный список', 'Номера, которым бот не отвечает и которые вообще не попадают в CRM: спам, личные контакты. По одному на строку или через запятую, в любом формате — «050-123-4567» или «+972 50 123 4567».',
           `<textarea id="f-blocked" class="mono" rows="4" placeholder="+972 50 123 4567">${esc(s.blocked_numbers || '')}</textarea>`)
         + srow('Уведомления в браузере', 'Всплывающее уведомление, когда бот передаёт диалог человеку.',
           `<button class="btn" id="f-notify">${notifyReady() ? 'Уведомления включены'
@@ -1609,7 +1614,9 @@ async function saveSettings() {
   put('#f-managers', 'manager_numbers'); put('#f-adminurl', 'admin_url'); put('#f-sourcemap', 'source_map');
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
-  put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-quick', 'quick_replies');
+  put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-staff', 'staff_numbers');
+  put('#f-revivem', 'revive_months');
+  if ($('#f-reviveon')) body.revive_on = $('#f-reviveon').checked; put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');
   put('#f-holidays', 'holidays'); put('#f-autoclose', 'autoclose_days'); put('#f-wip', 'wip_need');

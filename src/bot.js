@@ -20,6 +20,15 @@ const listeners = new Set();
 // личные контакты, сотрудники, спам. Правится в админке на лету, перезапуск не нужен.
 // Сравниваем по последним 9 цифрам: так «050-123-4567» и «+972 50 123 4567» — один номер.
 const tail = (v) => String(v ?? '').replace(/\D/g, '').slice(-9);
+/** Номер сотрудника: чат виден в CRM (колонка «Сотрудники»), но бот ему не отвечает. */
+function isStaff(phone) {
+  const me = tail(phone);
+  if (me.length < 7) return false;
+  return (getSetting('staff_numbers') || '')
+    .split(/[,;\n]+/).map(tail).filter((n) => n.length >= 7)
+    .includes(me);
+}
+
 function blocked(phone) {
   const me = tail(phone);
   if (me.length < 7) return false;
@@ -204,7 +213,12 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
     for (const it of media) for (const f of [it.file, ...(it.frames ?? [])]) fs.rm(mediaPath(f), { force: true }, () => {});
     return;
   }
-  const conv = getOrCreateConversation(ch.name, phone, name, chat_id);
+  const conv0 = getOrCreateConversation(ch.name, phone, name, chat_id);
+  // сотрудник из списка — сразу в «Сотрудники», без бота
+  if (isStaff(phone) && conv0.archive !== 'staff') {
+    db.prepare("UPDATE conversations SET status='closed', archive='staff', ai_enabled=0, needs_human=0, handoff_reason=NULL WHERE id=?").run(conv0.id);
+  }
+  const conv = getConversation(conv0.id);
   // откуда клиент: карточка объявления от WhatsApp или метка #… в тексте ссылки.
   // Если в справочнике кампаний нашёлся ключ — пишем название кампании, а не «Реклама Facebook»
   const src = ref || tagSource(text);
@@ -238,6 +252,8 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
   emit('conversations', null);
 
   const fresh = getConversation(conv.id);
+  // чат сотрудника: сообщение видно в CRM, но бот не отвечает и менеджеров не дёргает
+  if (fresh.archive === 'staff') return;
   const aiOn = getSetting('ai_global') === '1' && fresh.ai_enabled === 1;
   if (!aiOn) return;
 
@@ -496,6 +512,30 @@ export async function runFollowUps() {
     WHERE c.status != 'closed' AND c.nudge_stop = 0`).all();
 
   let sent = 0, changed = false;
+
+  // 0. Через N месяцев после отказа: бот возвращается к клиенту и спрашивает,
+  //    актуален ли переезд. Диалог при этом снова становится рабочим — ответ клиента
+  //    подхватит бот, как в новой заявке
+  if (nowHour >= openHour + 1) {
+    const revive = db.prepare(`SELECT * FROM conversations WHERE status='closed' AND archive='refused'
+      AND followup_who='revive' AND followup_at <= ? AND nudge_stop=0 ORDER BY followup_at LIMIT ?`).all(today, PER_RUN);
+    for (const conv of revive) {
+      try {
+        const ago = Math.max(1, Math.round((Date.now() - new Date(String(conv.created_at).replace(' ', 'T') + 'Z')) / (30.4 * 864e5)));
+        const sameYear = String(conv.created_at).slice(0, 4) === today.slice(0, 4);
+        if (await sendInitiative(conv, 'revive', { note: conv.followup_note || '', outside: true, ago, sameYear })) {
+          let lead = {};
+          try { lead = JSON.parse(conv.lead || '{}'); } catch {}
+          if (lead.stage === 'отказ') lead.stage = 'уточняем';
+          db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
+              followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=? WHERE id=?`).run(JSON.stringify(lead), conv.id);
+          addMessage(conv.id, { direction: 'out', author: 'system', body: 'Бот вернулся к клиенту после отказа: спросил, актуален ли переезд' });
+          sent++; changed = true;
+        }
+      } catch (e) { console.error('напоминание после отказа:', e.message); }
+    }
+  }
+
   for (const conv of rows) {
     if (sent >= PER_RUN) break;
     try {
