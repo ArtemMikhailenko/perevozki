@@ -94,6 +94,8 @@ app.get('/api/state', (req, res) => {
     staff_numbers: getSetting('staff_numbers') || '',
     revive_on: getSetting('revive_on') === '1',
     revive_months: Number(getSetting('revive_months')) || 10,
+    revive_text_lost: getSetting('revive_text_lost') || '',
+    revive_text_done: getSetting('revive_text_done') || '',
     manager_numbers: getSetting('manager_numbers'),
     notify_on: getSetting('notify_on') === '1',
     admin_url: getSetting('admin_url') || process.env.RENDER_EXTERNAL_URL || '',
@@ -135,6 +137,7 @@ app.post('/api/state', (req, res) => {
   if ('blocked_numbers' in req.body) setSetting('blocked_numbers', String(req.body.blocked_numbers));
   if ('staff_numbers' in req.body) setSetting('staff_numbers', String(req.body.staff_numbers));
   if ('revive_on' in req.body) setSetting('revive_on', req.body.revive_on ? '1' : '0');
+  for (const k of ['revive_text_lost', 'revive_text_done']) if (k in req.body) setSetting(k, String(req.body[k]).trim());
   if ('revive_months' in req.body) setSetting('revive_months', String(Math.min(36, Math.max(1, Number(req.body.revive_months) || 10))));
   if ('manager_numbers' in req.body) setSetting('manager_numbers', String(req.body.manager_numbers));
   if ('notify_on' in req.body) setSetting('notify_on', req.body.notify_on ? '1' : '0');
@@ -342,7 +345,7 @@ app.post('/api/conversations/:id/lead', (req, res) => {
     const w = String(req.body.followup_who ?? '').trim();
     // в «Отказе» «бот напишет клиенту» — это возврат к клиенту через месяцы: метку сохраняем,
     // иначе напоминание по закрытой заявке никогда не уйдёт
-    const who = w === 'manager' ? 'manager' : conv.archive === 'refused' ? 'revive' : null;
+    const who = w === 'manager' ? 'manager' : ['refused', 'done'].includes(conv.archive) ? 'revive' : null;
     db.prepare('UPDATE conversations SET followup_who=? WHERE id=?').run(who, id);
   }
   // Напоминание можно поправить руками: клиент позвонил и перенёс сроки,
@@ -532,6 +535,7 @@ const COLUMN_ACTIONS = {
   quoted:  { needs: 0, stage: 'назвали цену' },
   agreed:  { needs: 0, stage: 'дата согласована' },
   // архив: три корзины вместо одной кучи «закрыто»
+  done:    { status: 'closed', needs: 0, archive: 'done' },
   staff:   { ai: 0, status: 'closed', needs: 0, archive: 'staff' },
   later:   { status: 'closed', needs: 0, archive: 'later' },
   refused: { status: 'closed', needs: 0, archive: 'refused', stage: 'отказ' }
@@ -564,14 +568,14 @@ app.post('/api/conversations/:id/column', (req, res) => {
 
   // «Отказ»: через N месяцев бот сам напишет и спросит, актуален ли переезд.
   // Вынули из «Отказа» — это напоминание больше не нужно
-  if (key === 'refused' || key === 'closed') {
+  if (key === 'refused' || key === 'closed' || key === 'done') {
     if (getSetting('revive_on') === '1' && !conv.nudge_stop) {
       const months = Math.max(1, Number(getSetting('revive_months')) || 10);
       const d = new Date(); d.setMonth(d.getMonth() + months);
-      const route = [lead.from_city, lead.to_city].filter(Boolean).join(' → ');
       set.followup_at = new Intl.DateTimeFormat('sv-SE').format(d);
       set.followup_who = 'revive';
-      set.followup_note = `прошлое обращение${route ? ': переезд ' + route : ''}${lead.date ? ', хотели ' + lead.date : ''} — узнать, актуален ли переезд`;
+      set.followup_note = key === 'done' ? 'переезжали с нами — спросить, не нужен ли новый переезд'
+        : 'обращались, но не переехали — спросить, актуален ли переезд';
     }
   } else if (conv.followup_who === 'revive') {
     set.followup_at = null; set.followup_who = null; set.followup_note = null;
@@ -581,7 +585,7 @@ app.post('/api/conversations/:id/column', (req, res) => {
   db.prepare(`UPDATE conversations SET ${keys.map((k) => `${k}=?`).join(',')} WHERE id=?`)
     .run(...keys.map((k) => set[k]), id);
   if (set.followup_who === 'revive') {
-    addMessage(id, { direction: 'out', author: 'system', body: `Бот напишет клиенту ${set.followup_at}: узнает, актуален ли переезд` });
+    addMessage(id, { direction: 'out', author: 'system', body: `Бот напишет клиенту ${set.followup_at}: ${set.followup_note}` });
   }
 
   emit('conversations', null);

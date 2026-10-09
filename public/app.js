@@ -107,6 +107,7 @@ const COLUMNS = [
 // Архив — не одна куча «закрыто»: там вперемешку свои сотрудники, живые лиды
 // «не сейчас» и настоящие отказы. С одной колонкой это невозможно разобрать.
 const ARCHIVE = [
+  { k:'done',    t:'Переехали с нами', c:'var(--s3)',  hint:'клиент переехал — через 10 месяцев бот спросит про новый переезд' },
   { k:'staff',   t:'Сотрудники',    c:'var(--s1)',     hint:'свои номера, не клиенты' },
   { k:'later',   t:'На потом',      c:'var(--s4)',     hint:'лид живой, но не сейчас' },
   { k:'refused', t:'Отказ',         c:'var(--muted)',  hint:'не релевантно или клиент отказался' }
@@ -1428,9 +1429,13 @@ function renderSettings() {
           + srow('В день переезда, в котором часу', '', unit('f-confirmmorning', s.confirm_morning_hour ?? 8, 'часов', 6, 12))
           + srow('Напомнить менеджеру о тихом диалоге', 'Диалоги, которые ведёт человек, бот не дожимает — вместо этого пишет менеджеру.',
             unit('f-mgrping', s.manager_ping_hours ?? 48, 'часов', 2, 336)))
-        + grp('Вернуться к клиенту после отказа', 'Заявку перенесли в «Отказ» — через несколько месяцев бот сам напишет клиенту: напомнит о прошлом обращении и спросит, актуален ли переезд. Дата видна в карточке в блоке «Напомнить», её можно поменять или убрать.',
-          srow('Возвращаться к отказавшимся', '', `<label class="switch"><input type="checkbox" id="f-reviveon" ${s.revive_on ? 'checked' : ''}></label>`)
-          + srow('Через сколько месяцев', '', unit('f-revivem', s.revive_months ?? 10, 'мес.', 1, 36)))
+        + grp('Вернуться к клиенту через месяцы', 'Заявку перенесли в «Отказ» или в «Переехали с нами» — через несколько месяцев бот сам отправит клиенту готовое сообщение. Дата видна в карточке в блоке «Напомнить», её можно поменять или убрать. После сообщения заявка снова в работе, ответ клиента подхватит бот.',
+          srow('Возвращаться к клиентам', '', `<label class="switch"><input type="checkbox" id="f-reviveon" ${s.revive_on ? 'checked' : ''}></label>`)
+          + srow('Через сколько месяцев', '', unit('f-revivem', s.revive_months ?? 10, 'мес.', 1, 36))
+          + srow('Текст для «Отказа»', 'По строке на язык: <code>he: …</code>. <code>{name}</code> — имя клиента, <code>{when}</code> — «в прошлом году» или «несколько месяцев назад».',
+            `<textarea id="f-revlost" dir="auto" rows="5">${esc(s.revive_text_lost || '')}</textarea>`)
+          + srow('Текст для «Переехали с нами»', '<code>{When_cap}</code> — то же с большой буквы, для начала фразы.',
+            `<textarea id="f-revdone" dir="auto" rows="5">${esc(s.revive_text_done || '')}</textarea>`))
         + grp('Промпт', 'Роль, стиль речи, что собирать по заявке, когда звать человека. Цены сюда не вписывайте — они в прайсе.',
           swide(`<textarea id="f-prompt" class="mono" dir="auto" rows="16">${esc(s.system_prompt || '')}</textarea>`))
     },
@@ -1615,7 +1620,7 @@ async function saveSettings() {
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-staff', 'staff_numbers');
-  put('#f-revivem', 'revive_months');
+  put('#f-revivem', 'revive_months'); put('#f-revlost', 'revive_text_lost'); put('#f-revdone', 'revive_text_done');
   if ($('#f-reviveon')) body.revive_on = $('#f-reviveon').checked; put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');

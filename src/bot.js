@@ -69,6 +69,36 @@ const PHRASES = {
 const phrase = (key, convId, text = '') =>
   PHRASES[key][dominantLang(history(convId, 10)) || (text ? detectLang(text) : '') || 'ru'] ?? PHRASES[key].ru;
 
+/**
+ * Готовый текст возврата к клиенту через месяцы (после отказа или после переезда).
+ * Без модели: текст утверждён, а маршрут и детали прошлого раза клиенту не нужны.
+ */
+const WHEN = {
+  ru: ['в прошлом году', 'несколько месяцев назад'], he: ['בשנה שעברה', 'לפני כמה חודשים'],
+  en: ['last year', 'a few months ago'], uk: ['минулого року', 'кілька місяців тому']
+};
+export function reviveText(conv) {
+  const key = conv.archive === 'done' ? 'revive_text_done' : 'revive_text_lost';
+  const raw = (getSetting(key) || '').trim();
+  const map = new Map();
+  for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = /^([a-z]{2}):\s*(.+)$/i.exec(line);
+    if (m) map.set(m[1].toLowerCase(), m[2]);
+  }
+  const lang = dominantLang(history(conv.id, 20)) || 'he';
+  const tpl = map.get(lang) ?? map.get('he') ?? map.get('ru') ?? [...map.values()][0] ?? raw;
+  if (!tpl) return '';
+  let l = {};
+  try { l = JSON.parse(conv.lead || '{}'); } catch {}
+  const name = String(l.name || conv.name || '').trim().split(/\s+/)[0];
+  const sameYear = String(conv.created_at).slice(0, 4) === new Intl.DateTimeFormat('sv-SE').format(new Date()).slice(0, 4);
+  const when = (WHEN[lang] ?? WHEN.ru)[sameYear ? 1 : 0];
+  return tpl
+    .replaceAll('{name}', name && !/^\+?\d+$/.test(name) ? (lang === 'he' ? ' ' : ', ') + name : '')
+    .replaceAll('{When_cap}', when.charAt(0).toUpperCase() + when.slice(1))
+    .replaceAll('{when}', when);
+}
+
 /** Приветствие хранится строками вида «uk: текст»; берём подходящее, иначе первое. */
 function pickGreeting(text) {
   const raw = (getSetting('greeting') || '').trim();
@@ -517,19 +547,29 @@ export async function runFollowUps() {
   //    актуален ли переезд. Диалог при этом снова становится рабочим — ответ клиента
   //    подхватит бот, как в новой заявке
   if (nowHour >= openHour + 1) {
-    const revive = db.prepare(`SELECT * FROM conversations WHERE status='closed' AND archive='refused'
+    const revive = db.prepare(`SELECT * FROM conversations WHERE status='closed' AND archive IN ('refused', 'done')
       AND followup_who='revive' AND followup_at <= ? AND nudge_stop=0 ORDER BY followup_at LIMIT ?`).all(today, PER_RUN);
     for (const conv of revive) {
       try {
-        const ago = Math.max(1, Math.round((Date.now() - new Date(String(conv.created_at).replace(' ', 'T') + 'Z')) / (30.4 * 864e5)));
-        const sameYear = String(conv.created_at).slice(0, 4) === today.slice(0, 4);
-        if (await sendInitiative(conv, 'revive', { note: conv.followup_note || '', outside: true, ago, sameYear })) {
+        const text = reviveText(conv);
+        let ok = false;
+        if (text) {
+          try {
+            const wa = (await adapterFor(conv).send(conv, text)).wa_id;
+            const msg = addMessage(conv.id, { direction: 'out', author: 'ai', body: text, wa_id: wa, kind: 'revive' });
+            emit('message', { conv_id: conv.id, message: msg });
+            ok = true;
+          } catch (e) { console.error('возврат к клиенту не ушёл:', e.message); }
+        }
+        if (ok) {
           let lead = {};
           try { lead = JSON.parse(conv.lead || '{}'); } catch {}
           if (lead.stage === 'отказ') lead.stage = 'уточняем';
           db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
               followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=? WHERE id=?`).run(JSON.stringify(lead), conv.id);
-          addMessage(conv.id, { direction: 'out', author: 'system', body: 'Бот вернулся к клиенту после отказа: спросил, актуален ли переезд' });
+          addMessage(conv.id, { direction: 'out', author: 'system', body: conv.archive === 'done'
+            ? 'Бот написал бывшему клиенту: не планирует ли новый переезд'
+            : 'Бот вернулся к клиенту после отказа: спросил, актуален ли переезд' });
           sent++; changed = true;
         }
       } catch (e) { console.error('напоминание после отказа:', e.message); }
