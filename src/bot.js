@@ -470,6 +470,24 @@ async function respond(convId, ch, text) {
     if (k.length < 12) return true;
     return !said.some((old) => old.includes(k) || k.includes(old));
   });
+  // Вопрос о том, что клиент уже сказал, клиенту не отправляем: «пакуете сами?» второй
+  // раз или «откуда и куда?», когда маршрут известен, — именно так бот «заедал» клиентов.
+  // Убираем только вопросы и только если в ответе останется что отправить
+  // известно было ДО этого сообщения клиента: только что названное подтверждать можно
+  const before = JSON.parse(fresh.lead || '{}');
+  const ASKED = [
+    [() => before.packing, /упаков|пакует|пакуете|אריז|לארוז|אורז|pack/i],
+    [() => before.from_city && before.to_city, /откуда|куда переез|מאיפה|לאן|לאיפה|from where|where (are you )?moving|which cit/i],
+    [() => before.boxes, /сколько короб|כמה קרטונ|how many box/i]
+  ];
+  // смотрим только на сам вопрос, а не на подтверждение перед ним
+  const question = (r) => String(r).split(/(?<=[.!])\s+/).filter((x) => x.includes('?')).join(' ');
+  const repeatQ = (r) => ASKED.some(([known, re]) => known() && re.test(question(r)));
+  if (replies.some(repeatQ) && replies.some((r) => !repeatQ(r))) {
+    const dropped = replies.filter(repeatQ);
+    replies = replies.filter((r) => !repeatQ(r));
+    console.log(`[повтор] диалог ${conv.id}: не отправили вопрос о известном — ${dropped.join(' | ').slice(0, 160)}`);
+  }
   if (!replies.length) return;
 
   // первый наш ответ в диалоге предваряем приветствием с раскрытием ИИ:
