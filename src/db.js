@@ -318,6 +318,19 @@ seed.run('confirm_morning_hour', '8');
 seed.run('manager_ping_hours', '48');
 // Отказ — не навсегда: через N месяцев бот сам спросит, актуален ли переезд
 seed.run('revive_on', '1');
+// Не больше N «возвратов» в день: сотни сообщений старым контактам за день — прямой
+// путь к блокировке номера в WhatsApp. Очередь растягивается на дни сама
+seed.run('revive_daily_max', '15');
+{
+  const c2 = db.prepare('PRAGMA table_info(conversations)').all().map((c) => c.name);
+  if (!c2.includes('lang')) db.exec('ALTER TABLE conversations ADD COLUMN lang TEXT');
+  // откуда бот «разбудил» клиента: ответит «не актуально» — вернём туда же с новым сроком
+  if (!c2.includes('revived_from')) {
+    db.exec('ALTER TABLE conversations ADD COLUMN revived_from TEXT');
+    db.exec('ALTER TABLE conversations ADD COLUMN revived_at TEXT');
+    db.exec('ALTER TABLE conversations ADD COLUMN imported TEXT');   // откуда взят клиент при импорте
+  }
+}
 seed.run('revive_months', '10');
 // Готовые тексты возврата: «{name}» — имя клиента, «{when}» — «в прошлом году» или
 // «несколько месяцев назад», смотря когда было обращение. По строке на язык, как приветствие

@@ -1047,6 +1047,38 @@ function bindChat(root) {
   };
   inp.focus();
 }
+/** Импорт старых клиентов: проверка, затем загрузка по кнопке. */
+function bindImport() {
+  const inp = $('#f-impfile'), box = $('#f-imprep');
+  let data = null;
+  const show = (r, applied) => {
+    const days = Math.ceil((r.due_now || 0) / (r.daily_max || 15));
+    box.innerHTML = `<div class="imp-sum">
+        <b>${applied ? 'Загружено' : 'Будет загружено'}:</b> «Переехали с нами» — ${r.done}, «Отказ» — ${r.refused}.
+        ${r.skipped_existing ? `<br>Уже есть в CRM, пропущено: ${r.skipped_existing}.` : ''}
+        ${r.skipped_bad ? `<br>Без телефона или повтор, пропущено: ${r.skipped_bad}.` : ''}
+        ${r.staff_added ? `<br>Номера сотрудников и поставщиков в «Сотрудники»: ${r.staff_added}.` : ''}
+        <br>Напишем с ${r.first_due || '—'} по ${r.last_due || '—'}.
+        ${r.due_now ? `<br>У ${r.due_now} срок уже наступил — им бот напишет первыми, по ${r.daily_max} в день (это ~${days} дн.), чтобы WhatsApp не счёл это рассылкой.` : ''}
+      </div>${applied ? '' : '<button class="btn primary" id="f-impgo" style="margin-top:10px">Загрузить в CRM</button>'}`;
+    $('#f-impgo') && ($('#f-impgo').onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Загружаем…';
+      try { show(await api('/api/import/contacts?apply=1', { method: 'POST', body: JSON.stringify(data) }), true); toast('Клиенты загружены в архив'); loadList(); }
+      catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Загрузить в CRM'; }
+    });
+  };
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    try {
+      data = JSON.parse(await f.text());
+      box.innerHTML = '<div class="muted">проверяем…</div>';
+      show(await api('/api/import/contacts', { method: 'POST', body: JSON.stringify(data) }), false);
+    } catch (err) { box.innerHTML = `<div class="imp-sum bad">Не получилось прочитать файл: ${esc(err.message)}</div>`; }
+  };
+  inp.addEventListener('change', (e) => e.stopPropagation());
+}
+
 async function loadDocs() {
   const box = $('#f-docs');
   const docs = await api('/api/docs').catch(() => []);
@@ -1432,6 +1464,8 @@ function renderSettings() {
         + grp('Вернуться к клиенту через месяцы', 'Заявку перенесли в «Отказ» или в «Переехали с нами» — через несколько месяцев бот сам отправит клиенту готовое сообщение. Дата видна в карточке в блоке «Напомнить», её можно поменять или убрать. После сообщения заявка снова в работе, ответ клиента подхватит бот.',
           srow('Возвращаться к клиентам', '', `<label class="switch"><input type="checkbox" id="f-reviveon" ${s.revive_on ? 'checked' : ''}></label>`)
           + srow('Через сколько месяцев', '', unit('f-revivem', s.revive_months ?? 10, 'мес.', 1, 36))
+          + srow('Не больше в день', 'Сколько таких сообщений бот отправляет за день. Много сообщений старым контактам разом WhatsApp может принять за рассылку и заблокировать номер.',
+            unit('f-revivemax', s.revive_daily_max ?? 15, 'сообщ.', 1, 60))
           + srow('Текст для «Отказа»', 'По строке на язык: <code>he: …</code>. <code>{name}</code> — имя клиента, <code>{when}</code> — «в прошлом году» или «несколько месяцев назад».',
             `<textarea id="f-revlost" dir="auto" rows="5">${esc(s.revive_text_lost || '')}</textarea>`)
           + srow('Текст для «Переехали с нами»', '<code>{When_cap}</code> — то же с большой буквы, для начала фразы.',
@@ -1491,8 +1525,10 @@ function renderSettings() {
           swide('<div id="f-srclist" class="srclist">загружаем…</div>'))
     },
     data: {
-      lead: 'Перед запуском рекламы переписку лучше стереть: тестовые диалоги портят воронку, средний чек и отчёты. Настройки, прайс, расписание и привязка WhatsApp останутся на месте.',
-      body: grp('Сброс переписки', 'Удаляются все диалоги, сообщения, заявки и присланные файлы. Отменить нельзя, копии не остаётся.',
+      lead: 'Импорт старых клиентов из WhatsApp и сброс тестовой переписки. Настройки, прайс, расписание и привязка WhatsApp при сбросе останутся на месте.',
+      body: grp('Импорт старых клиентов', 'Файл импорта (.json), подготовленный из выгрузки WhatsApp. Клиенты лягут в архив — «Переехали с нами» и «Отказ», — и бот напишет каждому через несколько месяцев после последнего сообщения. Кто уже есть в CRM, не трогаем. Сначала покажем, что будет загружено.',
+          swide(`<input type="file" id="f-impfile" accept=".json,application/json"><div id="f-imprep" class="imprep"></div>`))
+        + grp('Сброс переписки', 'Удаляются все диалоги, сообщения, заявки и присланные файлы. Отменить нельзя, копии не остаётся.',
         srow('Стереть данные', 'Спросим подтверждение: нужно будет набрать слово СТЕРЕТЬ.',
           '<button class="btn danger" id="f-wipe">Стереть все диалоги</button>'))
     },
@@ -1535,6 +1571,7 @@ function renderSettings() {
   $('.set-body').addEventListener('input', () => setDirty(true));
   if ($('#f-hours')) renderHourRows(state.work_hours || {});
   if ($('#f-docs')) loadDocs();
+  if ($('#f-impfile')) bindImport();
   $$('.opt').forEach((o) => o.onclick = () => {
     $$('.opt').forEach((x) => x.classList.toggle('on', x === o));
     $('#f-off').value = o.dataset.v;
@@ -1620,7 +1657,7 @@ async function saveSettings() {
   put('#f-effort', 'ai_effort');
   if ($('#f-notifyon')) body.notify_on = $('#f-notifyon').checked;
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-staff', 'staff_numbers');
-  put('#f-revivem', 'revive_months'); put('#f-revlost', 'revive_text_lost'); put('#f-revdone', 'revive_text_done');
+  put('#f-revivem', 'revive_months'); put('#f-revivemax', 'revive_daily_max'); put('#f-revlost', 'revive_text_lost'); put('#f-revdone', 'revive_text_done');
   if ($('#f-reviveon')) body.revive_on = $('#f-reviveon').checked; put('#f-quick', 'quick_replies');
   put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');

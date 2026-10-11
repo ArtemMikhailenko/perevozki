@@ -3,6 +3,7 @@ import path from 'node:path';
 import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
 import { handleIncoming, sendAsHuman, sendFileAsHuman, suggestReply, subscribe, emit } from './bot.js';
 import { saveUpload, listDocs, addDoc, deleteDoc, docItem, MAX_MB } from './files.js';
+import { importContacts } from './importer.js';
 import * as botState from './bot.js';
 import { channel, channels } from './channels/index.js';
 import { saveMedia } from './media.js';
@@ -94,6 +95,7 @@ app.get('/api/state', (req, res) => {
     staff_numbers: getSetting('staff_numbers') || '',
     revive_on: getSetting('revive_on') === '1',
     revive_months: Number(getSetting('revive_months')) || 10,
+    revive_daily_max: Number(getSetting('revive_daily_max')) || 15,
     revive_text_lost: getSetting('revive_text_lost') || '',
     revive_text_done: getSetting('revive_text_done') || '',
     manager_numbers: getSetting('manager_numbers'),
@@ -137,6 +139,7 @@ app.post('/api/state', (req, res) => {
   if ('blocked_numbers' in req.body) setSetting('blocked_numbers', String(req.body.blocked_numbers));
   if ('staff_numbers' in req.body) setSetting('staff_numbers', String(req.body.staff_numbers));
   if ('revive_on' in req.body) setSetting('revive_on', req.body.revive_on ? '1' : '0');
+  if ('revive_daily_max' in req.body) setSetting('revive_daily_max', String(Math.min(60, Math.max(1, Number(req.body.revive_daily_max) || 15))));
   for (const k of ['revive_text_lost', 'revive_text_done']) if (k in req.body) setSetting(k, String(req.body[k]).trim());
   if ('revive_months' in req.body) setSetting('revive_months', String(Math.min(36, Math.max(1, Number(req.body.revive_months) || 10))));
   if ('manager_numbers' in req.body) setSetting('manager_numbers', String(req.body.manager_numbers));
@@ -486,6 +489,15 @@ app.post('/api/conversations/:id/send-file', async (req, res) => {
     res.json(await sendFileAsHuman(Number(req.params.id), item, String(b.caption || '').trim(), Boolean(b.keep_ai)));
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+/* Импорт старых клиентов: сначала проверка (что и сколько), потом загрузка */
+app.post('/api/import/contacts', express.json({ limit: '20mb' }), (req, res) => {
+  try {
+    const out = importContacts(req.body, { apply: req.query.apply === '1' });
+    if (req.query.apply === '1') emit('conversations', null);
+    res.json(out);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.get('/api/docs', (req, res) => res.json(listDocs()));
 app.post('/api/docs', rawUpload, (req, res) => {
   try { res.json(addDoc(saveUpload(req.body, req.headers['content-type'], fileName(req)))); }

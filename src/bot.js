@@ -85,7 +85,7 @@ export function reviveText(conv) {
     const m = /^([a-z]{2}):\s*(.+)$/i.exec(line);
     if (m) map.set(m[1].toLowerCase(), m[2]);
   }
-  const lang = dominantLang(history(conv.id, 20)) || 'he';
+  const lang = dominantLang(history(conv.id, 20)) || conv.lang || 'he';
   const tpl = map.get(lang) ?? map.get('he') ?? map.get('ru') ?? [...map.values()][0] ?? raw;
   if (!tpl) return '';
   let l = {};
@@ -424,6 +424,24 @@ async function respond(convId, ch, text) {
     db.prepare('UPDATE conversations SET followup_at=?, followup_note=?, nudges=0 WHERE id=?')
       .run(out.follow_up_at, out.follow_up_note || '', conv.id);
   }
+  // Клиента «разбудили» через месяцы, а он отвечает по-разному:
+  //  — назвал срок («через 2 месяца») — заявка уходит в «На потом», бот напишет в этот день;
+  //  — «сейчас не актуально, спасибо» — обратно в архив, новый круг через N месяцев.
+  if (fresh.revived_from && !out.needs_human && !out.lead_ready) {
+    const months = Math.max(1, Number(getSetting('revive_months')) || 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(out.follow_up_at || '')) {
+      db.prepare(`UPDATE conversations SET status='closed', archive='later', followup_who='ai', revived_from=NULL WHERE id=?`).run(conv.id);
+      addMessage(conv.id, { direction: 'out', author: 'system', body: `Клиент назвал срок — в «На потом», бот напишет ${out.follow_up_at}` });
+    } else if (lead.stage === 'отказ') {
+      const d = new Date(); d.setMonth(d.getMonth() + months);
+      const day = new Intl.DateTimeFormat('sv-SE').format(d);
+      db.prepare(`UPDATE conversations SET status='closed', archive=?, followup_at=?, followup_who='revive',
+          followup_note=?, revived_from=NULL WHERE id=?`)
+        .run(fresh.revived_from, day, fresh.revived_from === 'done' ? 'переезжали с нами — спросить, не нужен ли новый переезд'
+          : 'обращались, но не переехали — спросить, актуален ли переезд', conv.id);
+      addMessage(conv.id, { direction: 'out', author: 'system', body: `Клиенту пока не актуально — бот снова напишет ${day}` });
+    }
+  }
 
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, 'заявка готова — посчитать стоимость переезда');
@@ -547,10 +565,29 @@ export async function runFollowUps() {
   //    актуален ли переезд. Диалог при этом снова становится рабочим — ответ клиента
   //    подхватит бот, как в новой заявке
   if (nowHour >= openHour + 1) {
-    const revive = db.prepare(`SELECT * FROM conversations WHERE status='closed' AND archive IN ('refused', 'done')
-      AND followup_who='revive' AND followup_at <= ? AND nudge_stop=0 ORDER BY followup_at LIMIT ?`).all(today, PER_RUN);
+    // по одному за проход (раз в 10 минут) и не больше N в день: массовая рассылка
+    // старым контактам с подключённого номера — частая причина блокировки WhatsApp
+    const dailyMax = Math.max(1, Number(getSetting('revive_daily_max')) || 15);
+    const sentToday = db.prepare(`SELECT count(*) n FROM messages WHERE kind IN ('revive', 'revive-ai')
+      AND created_at >= datetime('now', '-20 hours')`).get().n;
+    const revive = sentToday >= dailyMax ? [] : db.prepare(`SELECT * FROM conversations WHERE status='closed'
+      AND archive IN ('refused', 'done', 'later') AND followup_who IN ('revive', 'ai') AND followup_at <= ? AND nudge_stop=0
+      ORDER BY followup_at, id LIMIT 1`).all(today);
     for (const conv of revive) {
       try {
+        // «напишите через 2 месяца» — пишет модель по договорённости; остальное — готовым текстом
+        if (conv.followup_who === 'ai') {
+          const ok = await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: true });
+          if (ok) {
+            db.prepare("UPDATE messages SET kind='revive-ai' WHERE id=(SELECT max(id) FROM messages WHERE conv_id=? AND direction='out')").run(conv.id);
+            db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
+                followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, revived_from=?, revived_at=datetime('now') WHERE id=?`)
+              .run(conv.archive === 'later' ? 'refused' : conv.archive, conv.id);
+            addMessage(conv.id, { direction: 'out', author: 'system', body: 'Бот написал клиенту в договорённый срок' });
+            sent++; changed = true;
+          }
+          continue;
+        }
         const text = reviveText(conv);
         let ok = false;
         if (text) {
@@ -566,7 +603,8 @@ export async function runFollowUps() {
           try { lead = JSON.parse(conv.lead || '{}'); } catch {}
           if (lead.stage === 'отказ') lead.stage = 'уточняем';
           db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
-              followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=? WHERE id=?`).run(JSON.stringify(lead), conv.id);
+              followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=?, revived_from=?, revived_at=datetime('now')
+            WHERE id=?`).run(JSON.stringify(lead), conv.archive, conv.id);
           addMessage(conv.id, { direction: 'out', author: 'system', body: conv.archive === 'done'
             ? 'Бот написал бывшему клиенту: не планирует ли новый переезд'
             : 'Бот вернулся к клиенту после отказа: спросил, актуален ли переезд' });
