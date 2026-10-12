@@ -118,6 +118,7 @@ app.get('/api/state', (req, res) => {
     stop_words: getSetting('stop_words'),
     business_facts: getSetting('business_facts'),
     reply_delay: getSetting('reply_delay'),
+    media_wait: getSetting('media_wait'),
     company: getSetting('company'),
     timezone: scheduleSetting('timezone'),
     work_hours: workHours(),
@@ -162,6 +163,7 @@ app.post('/api/state', (req, res) => {
   }
   if ('business_facts' in req.body) setSetting('business_facts', String(req.body.business_facts));
   if ('reply_delay' in req.body) setSetting('reply_delay', String(Number(req.body.reply_delay) || 4000));
+  if ('media_wait' in req.body) setSetting('media_wait', String(Math.max(0, Math.min(600, Number(req.body.media_wait) || 0))));
   if ('wip_need' in req.body) setSetting('wip_need', String(Number(req.body.wip_need) || 0));
   if ('quick_replies' in req.body) setSetting('quick_replies', String(req.body.quick_replies));
   if ('work_hours' in req.body) {

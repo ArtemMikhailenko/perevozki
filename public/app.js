@@ -1437,7 +1437,9 @@ function renderSettings() {
       body: grp('Приветствие', 'Первое сообщение в каждом новом диалоге. По строке на язык в формате <code>uk: текст</code> — нужная выбирается по языку клиента, <code>{company}</code> заменится названием компании. Если клиент спросит прямо, бот честно ответит, что он ИИ.',
           swide(`<textarea id="f-greeting" dir="auto" rows="5">${esc(s.greeting || '')}</textarea>`))
         + grp('', '', srow('Пауза перед ответом', 'Бот ждёт, пока клиент допишет очередь сообщений, и отвечает один раз на всю пачку.',
-          unit('f-delay', Math.round((Number(s.reply_delay) || 4000) / 1000), 'секунд', 1, 60)))
+          unit('f-delay', Math.round((Number(s.reply_delay) || 4000) / 1000), 'секунд', 1, 60))
+          + srow('Пауза после фото и видео', 'Фото клиенты шлют по одному. Бот ждёт, пока клиент закончит присылать, и отвечает один раз на все.',
+          unit('f-mediawait', Number(s.media_wait ?? 60), 'секунд', 0, 300)))
         + grp('Напоминания и дожим', 'Бот сам пишет первым в двух случаях: наступил день, о котором договорился с клиентом («напишите после ремонта»), или клиент замолчал после названной цены. Пишет только в рабочие часы.',
           srow('Дожимать молчунов', 'Выключите — останутся только напоминания по договорённости с клиентом.',
             `<label class="switch"><input type="checkbox" id="f-nudgeon" ${s.nudge_on ? 'checked' : ''}></label>`)
@@ -1659,7 +1661,7 @@ async function saveSettings() {
   put('#f-prompt', 'system_prompt'); put('#f-blocked', 'blocked_numbers'); put('#f-staff', 'staff_numbers');
   put('#f-revivem', 'revive_months'); put('#f-revivemax', 'revive_daily_max'); put('#f-revlost', 'revive_text_lost'); put('#f-revdone', 'revive_text_done');
   if ($('#f-reviveon')) body.revive_on = $('#f-reviveon').checked; put('#f-quick', 'quick_replies');
-  put('#f-delay', 'reply_delay', (v) => Number(v) * 1000);
+  put('#f-delay', 'reply_delay', (v) => Number(v) * 1000); put('#f-mediawait', 'media_wait');
   put('#f-off', 'off_hours'); put('#f-offnote', 'off_hours_note');
   put('#f-holidays', 'holidays'); put('#f-autoclose', 'autoclose_days'); put('#f-wip', 'wip_need');
 

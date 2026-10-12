@@ -175,18 +175,24 @@ function flagHuman(convId, reason) {
  * поэтому ждём, пока человек договорит, и отвечаем один раз на всю пачку.
  */
 const debounceMs = () => Math.max(500, Number(getSetting('reply_delay')) || 4000);
+// Фото клиент шлёт по одному с паузами больше обычной: бот отвечал на каждое и
+// по десять раз спрашивал про коробки. Пока в пачке есть фото или видео,
+// ждём дольше и отвечаем один раз, когда клиент закончил присылать.
+const mediaWaitMs = () => Math.max(debounceMs(), (Number(getSetting('media_wait')) || 0) * 1000);
 const timers = new Map();    // conv_id → таймер отложенного ответа
 const busy = new Set();      // conv_id → ответ уже генерируется
+const withMedia = new Set(); // conv_id → в ожидающей пачке есть фото или видео
 
 function scheduleReply(convId, ch, text) {
   clearTimeout(timers.get(convId));
   timers.set(convId, setTimeout(() => {
     timers.delete(convId);
+    withMedia.delete(convId);
     // если предыдущий ответ ещё идёт — не наслаиваемся, подождём и попробуем снова
     if (busy.has(convId)) return scheduleReply(convId, ch, text);
     busy.add(convId);
     respond(convId, ch, text).finally(() => busy.delete(convId));
-  }, debounceMs()));
+  }, withMedia.has(convId) ? mediaWaitMs() : debounceMs()));
 }
 
 /** Входящее сообщение клиента: сохранить → при включённом ИИ поставить ответ в очередь. */
@@ -228,6 +234,7 @@ async function processOutgoing({ phone, text, wa_id, chat_id = null, media = [] 
 
   clearTimeout(timers.get(conv.id));       // бот собирался ответить — уже не нужно
   timers.delete(conv.id);
+  withMedia.delete(conv.id);
 
   const msg = addMessage(conv.id, { direction: 'out', author: 'human', body: text || '', wa_id, media });
   db.prepare(`UPDATE conversations SET ai_enabled=0, status='human', needs_human=0,
@@ -335,6 +342,7 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
     }
   }
 
+  if (media.some((m) => m.kind === 'image' || m.kind === 'video')) withMedia.add(conv.id);
   scheduleReply(conv.id, ch, body);
 }
 
