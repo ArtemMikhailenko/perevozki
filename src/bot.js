@@ -284,6 +284,30 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
     db.prepare('UPDATE conversations SET nudge_stop=1, followup_at=NULL, followup_note=NULL WHERE id=?').run(conv.id);
     addMessage(conv.id, { direction: 'out', author: 'system', body: 'Клиент просил не писать: напоминания для этого диалога выключены' });
   }
+  // Клиент из архива написал сам — «Отказ», «На потом», «Переехали с нами». Раньше
+  // заявка так и лежала в архиве: менеджер видел только счётчик непрочитанных и
+  // мог пропустить живого клиента. Теперь она возвращается на доску. Если диалог вёл
+  // бот — он продолжает; если менеджер — заявка встаёт в «Нужен человек».
+  // Ответ на «вернулся через N месяцев» сюда не попадает: тот диалог уже открыт.
+  const was = getConversation(conv.id);
+  const BACK_FROM = { refused: 'Отказ', later: 'На потом', done: 'Переехали с нами' };
+  if (was.status === 'closed' && BACK_FROM[was.archive] && !isStopRequest(body)) {
+    const lead = JSON.parse(was.lead || '{}');
+    if (lead.stage === 'отказ') lead.stage = 'уточняем';
+    const byBot = was.ai_enabled === 1 && getSetting('ai_global') === '1';
+    const reason = `клиент из «${BACK_FROM[was.archive]}» написал снова`;
+    db.prepare(`UPDATE conversations SET status=?, archive=NULL, needs_human=?, handoff_reason=?, lead=?, notified_at=NULL,
+        followup_at=CASE WHEN followup_who='revive' THEN NULL ELSE followup_at END,
+        followup_note=CASE WHEN followup_who='revive' THEN NULL ELSE followup_note END,
+        followup_who=CASE WHEN followup_who='revive' THEN NULL ELSE followup_who END WHERE id=?`)
+      .run(byBot ? 'ai' : 'human', byBot ? 0 : 1, byBot ? null : reason, JSON.stringify(lead), conv.id);
+    addMessage(conv.id, { direction: 'out', author: 'system',
+      body: `Клиент из архива «${BACK_FROM[was.archive]}» написал снова — заявка вернулась в работу (${byBot ? 'ИИ уточняет' : 'Нужен человек'})` });
+    notifyManagers(`↩️ Написал клиент из архива «${BACK_FROM[was.archive]}» — ${lead.name || was.name || 'клиент'}, +${was.phone}\n`
+      + `Пишет: ${String(body || '[вложение]').slice(0, 200)}\n${byBot ? 'Бот отвечает, заявка в «ИИ уточняет».' : 'Заявка в «Нужен человек».'}\n${adminLink(conv.id)}`)
+      .catch((e) => console.error('уведомление о возврате из архива:', e.message));
+  }
+
   // клиент ответил — счётчик напоминаний обнуляем
   db.prepare('UPDATE conversations SET unread = unread + 1, nudges = 0 WHERE id=?').run(conv.id);
   emit('message', { conv_id: conv.id, message: msg });
