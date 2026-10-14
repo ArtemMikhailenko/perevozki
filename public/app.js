@@ -893,6 +893,7 @@ function chatHtml(c) {
                      : '<button class="btn primary" data-a="giveback">Вернуть ИИ</button>'}
       <button class="btn" data-a="card">Карточка</button>
       <button class="btn ghost" data-a="close">${c.status === 'closed' ? 'Открыть' : 'Закрыть'}</button>
+      <button class="btn ghost more-btn" data-a="move" title="Перенести в другую колонку" aria-label="Перенести">⋯</button>
     </div>
     ${c.needs_human ? `<div class="alert">⚠ ${esc(c.handoff_reason || 'ИИ просит подключиться')}</div>` : ''}
     <div class="scroll" data-r="wrap"><div class="thread" data-r="thread"></div></div>
@@ -943,6 +944,28 @@ function bindChat(root) {
       + ARCHIVE.map((x) => `<div data-k="${x.k}"><b>${x.t}</b><span>${x.hint}</span></div>`).join('');
     e.currentTarget.parentElement.appendChild(menu);
     $$('div[data-k]', menu).forEach((d) => d.onclick = () => { menu.remove(); moveTo(c.id, d.dataset.k); });
+    setTimeout(() => document.addEventListener('click', function off(ev) {
+      if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', off); }
+    }), 0);
+  };
+
+  // «⋯» — перенести в любую колонку прямо из переписки: на телефоне доски
+  // с перетаскиванием нет, а переносить клиента нужно и оттуда
+  q('[data-a="move"]').onclick = (e) => {
+    const old = root.querySelector('.pickmenu');
+    if (old) return old.remove();
+    const cur = columnOf(c);
+    const row = (x) => `<div data-k="${x.k}" class="${x.k === cur ? 'cur' : ''}"><b><i style="background:${x.c}"></i>${x.t}${
+      x.k === cur ? ' · сейчас здесь' : ''}</b><span>${x.hint}</span></div>`;
+    const menu = document.createElement('div');
+    menu.className = 'pickmenu wide';
+    menu.innerHTML = '<div class="hint">Перенести в колонку</div>' + COLUMNS.map(row).join('')
+      + '<div class="hint">В архив</div>' + ARCHIVE.map(row).join('');
+    e.currentTarget.parentElement.appendChild(menu);
+    $$('div[data-k]', menu).forEach((d) => d.onclick = () => {
+      menu.remove();
+      if (d.dataset.k !== cur) moveTo(c.id, d.dataset.k);
+    });
     setTimeout(() => document.addEventListener('click', function off(ev) {
       if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', off); }
     }), 0);
