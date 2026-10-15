@@ -76,6 +76,11 @@ const count = (value) => {
 // иначе дожим будет считать, что в заявке дыра.
 const BASEMENT = ['подвал', 'цоколь', 'מרתף', 'basement', 'cellar'];
 const isBasement = (floor) => BASEMENT.some((w) => clean(floor).includes(clean(w)));
+// Земля: частный дом, דירת גן, קרקע — нулевой этаж, лифт не нужен. Бот про лифт
+// там не спрашивает; дозаполняем «нет», чтобы дожим не видел дыры в заявке
+const GROUND = ['קרקע', 'דירת גן', 'בית פרטי', 'קומה 0', 'вилла', 'частный дом', 'земл', 'нулев',
+  'ground', 'garden', 'private house', 'villa'];
+const isGround = (floor) => { const f = clean(floor); return f === '0' || GROUND.some((w) => f.includes(clean(w))); };
 
 /** Карточка после модели: непонятные значения обнуляем, но не роняем ответ. */
 export function normalizeLead(lead = {}) {
@@ -93,6 +98,8 @@ export function normalizeLead(lead = {}) {
   if (out.to_elevator === 'да') out.to_floor = '';
   if (isBasement(lead.from_floor) && !out.from_elevator) out.from_elevator = 'нет';
   if (isBasement(lead.to_floor) && !out.to_elevator) out.to_elevator = 'нет';
+  if (isGround(lead.from_floor) && !out.from_elevator) out.from_elevator = 'нет';
+  if (isGround(lead.to_floor) && !out.to_elevator) out.to_elevator = 'нет';
 
   // дата в карточке — либо настоящая ГГГГ-ММ-ДД, либо ничего: по ней строится расписание
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(out.date_iso ?? ''))) out.date_iso = '';
