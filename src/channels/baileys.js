@@ -25,6 +25,12 @@ const DEBUG = process.env.WA_DEBUG === '1';   // печатать всё, что
 const sentIds = new Set();   // свои же отправленные — не обрабатывать повторно
 const status = { state: 'offline', qr: null, me: null, error: null, pairCode: null, pairPhone: null };
 const AUTH_DIR = path.join(process.cwd(), 'data', 'wa-auth');
+// Когда мы последний раз точно были на связи: пишем раз в минуту, пока онлайн.
+// По нему после перезапуска (деплоя) узнаём сообщения, пришедшие, пока нас не было
+const SEEN_FILE = path.join(process.cwd(), 'data', 'wa-last-seen');
+let lastSeen = (() => { try { return Number(fs.readFileSync(SEEN_FILE, 'utf8')) || 0; } catch { return 0; } })();
+const markSeen = () => { try { fs.mkdirSync(path.dirname(SEEN_FILE), { recursive: true }); fs.writeFileSync(SEEN_FILE, String(Date.now())); } catch {} };
+setInterval(() => { if (status.state === 'online') markSeen(); }, 60e3).unref?.();
 // номер поколения сокета: после «Переподключить» или «Отвязать» старый сокет
 // ещё успевает прислать события — они не должны менять состояние нового
 let gen = 0;
@@ -141,6 +147,8 @@ async function connect() {
       status.pairCode = null;
       status.pairPhone = null;
       status.me = sock.user?.id?.split(':')[0] ?? null;
+      // lastSeen обновим не сразу: догрузка пропущенного придёт следом
+      setTimeout(() => { lastSeen = Date.now(); markSeen(); }, 90e3).unref?.();
       console.log('WhatsApp подключён:', status.me,
         DEBUG ? `| id=${sock.user?.id} lid=${sock.user?.lid ?? '—'}` : '');
       pushStatus();
@@ -194,7 +202,13 @@ async function connect() {
 
       // 'append' — обычно догрузка истории, но свои сообщения из чата с собой
       // прилетают именно так, поэтому для них делаем исключение
-      if (type !== 'notify' && !(SELF_TEST && selfChat)) continue;
+      // Сообщения, пришедшие, пока сервер перезапускался (деплой), WhatsApp отдаёт
+      // после переподключения как 'append' — раньше они терялись. Берём новее
+      // момента, когда мы последний раз были на связи, и не старше 6 часов
+      const ts = Number(msg.messageTimestamp ?? 0) * 1000;
+      const missed = type === 'append' && !msg.key.fromMe && lastSeen && ts >= lastSeen - 120e3
+        && ts >= Date.now() - 6 * 3600e3 && ts <= Date.now() + 60e3;
+      if (type !== 'notify' && !missed && !(SELF_TEST && selfChat)) continue;
 
       if (sentIds.has(msg.key.id)) continue;                 // это наш собственный ответ
       // Менеджер ответил клиенту прямо с телефона. Раньше такие сообщения
