@@ -544,6 +544,8 @@ app.post('/api/conversations/:id/mode', (req, res) => {
  */
 const COLUMN_ACTIONS = {
   need:    { ai: 0, status: 'human', needs: 1, reason: 'передано менеджеру вручную' },
+  // «Дать цену»: заявка собрана, менеджеру осталось посчитать и назвать стоимость
+  price:   { ai: 0, status: 'human', needs: 1, reason: 'заявка готова — посчитать стоимость переезда', stage: 'заявка готова' },
   manager: { ai: 0, status: 'human', needs: 0, stage: 'уточняем' },
   ai:      { ai: 1, status: 'ai',    needs: 0, stage: 'уточняем' },
   quoted:  { needs: 0, stage: 'назвали цену' },

@@ -1,4 +1,4 @@
-import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, messageExists, setSource } from './db.js';
+import { db, addMessage, getOrCreateConversation, getConversation, history, getSetting, setSetting, messageExists, setSource } from './db.js';
 import { generateReply } from './ai.js';
 import { channel, adapterFor } from './channels/index.js';
 import { detectLang } from './lang.js';
@@ -161,6 +161,37 @@ function workableDay(iso) {
   const day = new Date(iso + 'T12:00:00Z').getUTCDay();
   return Array.isArray(workHours()[day]);
 }
+
+const READY_REASON = 'заявка готова — посчитать стоимость переезда';
+const hasMediaIn = (convId) => Boolean(db.prepare(
+  "SELECT 1 FROM messages WHERE conv_id=? AND direction='in' AND media IS NOT NULL LIMIT 1").get(convId));
+/** Заявку можно считать: известно откуда и куда, и бот передал её сам или в ней ничего не не хватает. */
+function readyLead(lead, convId, saidReady = false, asking = false) {
+  if (['назвали цену', 'готов к заказу', 'дата согласована', 'отказ'].includes(lead.stage)) return false;
+  const where = (lead.from_city || lead.from_address) && (lead.to_city || lead.to_address);
+  return Boolean(where && (saidReady || (!asking && !missingFor(lead, hasMediaIn(convId)).length)));
+}
+
+/**
+ * Один раз после обновления: собранные заявки, которые застряли в «ИИ уточняет»
+ * из-за старой проверки, переводим в «Дать цену». Без уведомлений — их десятки.
+ */
+function moveStuckReady() {
+  if (getSetting('ready_fix_done')) return;
+  let n = 0;
+  for (const c of db.prepare(`SELECT id, lead FROM conversations WHERE status='ai' AND needs_human=0`).all()) {
+    let lead = {};
+    try { lead = JSON.parse(c.lead || '{}'); } catch {}
+    if (!readyLead(lead, c.id)) continue;
+    lead.stage = 'заявка готова';
+    db.prepare(`UPDATE conversations SET lead=?, needs_human=1, handoff_reason=?, status='human', ai_enabled=0 WHERE id=?`)
+      .run(JSON.stringify(lead), READY_REASON, c.id);
+    n++;
+  }
+  setSetting('ready_fix_done', '1');
+  if (n) console.log(`[готовые заявки] в «Дать цену» перенесено: ${n}`);
+}
+setTimeout(() => { try { moveStuckReady(); } catch (e) { console.error('перенос готовых заявок:', e.message); } }, 5000).unref?.();
 
 function flagHuman(convId, reason) {
   notifyHandoff(convId, reason);            // менеджер должен узнать сразу, а не из админки
@@ -447,7 +478,14 @@ async function respond(convId, ch, text) {
   // Готовая заявка — без адреса это не заявка, даже если модель поспешила
   // дату подтверждает человек: бот только записывает пожелание клиента
   if (lead.stage === 'дата согласована') lead.stage = 'готов к заказу';
-  const ready = out.lead_ready && Boolean(lead.district || lead.address);
+  // Раньше готовность проверялась по полям district/address — их в карточке
+  // переезда нет, и собранная заявка так и висела в «ИИ уточняет». Теперь: есть
+  // откуда и куда, и либо бот сам сказал «передаю», либо по заявке ничего не
+  // не хватает (missingFor). Повторно не передаём: менеджер мог вернуть диалог боту
+  const prevStage = JSON.parse(fresh.lead || '{}').stage;
+  // бот ещё что-то спрашивает (имя, уточнение) — передадим следующим ходом, не на полуслове
+  const asking = (out.replies || []).some((r) => r.includes('?'));
+  const ready = readyLead(lead, conv.id, out.lead_ready, asking) && prevStage !== 'заявка готова';
   if (ready) lead.stage = 'заявка готова';
   db.prepare('UPDATE conversations SET lead=?, summary=?, status=CASE WHEN status=\'new\' THEN \'ai\' ELSE status END WHERE id=?')
     .run(JSON.stringify(lead), out.summary || fresh.summary, conv.id);
@@ -477,7 +515,7 @@ async function respond(convId, ch, text) {
   }
 
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
-  else if (ready) flagHuman(conv.id, 'заявка готова — посчитать стоимость переезда');
+  else if (ready) flagHuman(conv.id, READY_REASON);
 
   let replies = [...(out.replies ?? [])];
 

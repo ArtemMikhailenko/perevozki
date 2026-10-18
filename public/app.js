@@ -98,7 +98,8 @@ const plural = (n, a, b, c) => { const m = n % 100, k = n % 10;
 
 /* ───── колонки доски: комбинация владельца диалога и стадии воронки ───── */
 const COLUMNS = [
-  { k:'need',    t:'Нужен человек', c:'var(--warn)',   hint:'ИИ передал диалог' },
+  { k:'need',    t:'Нужен человек', c:'var(--warn)',   hint:'просит позвонить, непонятный вопрос, жалоба' },
+  { k:'price',   t:'Дать цену',     c:'var(--s5)', hint:'бот собрал заявку — посчитайте и назовите стоимость' },
   { k:'manager', t:'У менеджера',   c:'var(--s1)',     hint:'человек ведёт сам' },
   { k:'ai',      t:'ИИ уточняет',   c:'var(--accent)', hint:'бот собирает заявку' },
   { k:'quoted',  t:'Назвали цену',  c:'var(--s4)',     hint:'ждём решения клиента' },
@@ -120,6 +121,8 @@ function columnOf(c) {
   if (c.status === 'closed' || st === 'отказ') {
     return ARCHIVE.some((x) => x.k === c.archive) ? c.archive : 'refused';
   }
+  // собранная заявка — отдельно от «нужен человек»: там срочное, тут — дать цену
+  if (c.needs_human && /^заявка готова/.test(c.handoff_reason || '')) return 'price';
   if (c.needs_human) return 'need';
   if (['готов к заказу', 'дата согласована'].includes(st)) return 'agreed';
   if (st === 'назвали цену') return 'quoted';
