@@ -1002,12 +1002,19 @@ function bindChat(root) {
   const sendFile = async (body, label) => {
     const btn = q('[data-a="file"]');
     btn.disabled = true; btn.textContent = 'Отправляем…';
+    // подпись забираем и очищаем поле сразу — по той же причине, что и в send()
+    const caption = inp.value.trim();
+    const keepAi = root.querySelector('[data-r="keep"]').checked;
+    inp.value = '';
     try {
       await api(`/api/conversations/${c.id}/send-file`, { method: 'POST', body: JSON.stringify({
-        ...body, caption: inp.value.trim(), keep_ai: root.querySelector('[data-r="keep"]').checked }) });
-      inp.value = '';
+        ...body, caption, keep_ai: keepAi }) });
       toast(`Отправлено: ${label}`);
-    } catch (err) { toast('Не отправилось: ' + err.message, true); }
+    } catch (err) {
+      toast('Не отправилось: ' + err.message, true);
+      const now = (drawerOpen ? $('#drawer-chat') : $('#inbox-chat'))?.querySelector('[data-r="inp"]') || inp;
+      if (!now.value) now.value = caption;
+    }
     btn.disabled = false; btn.textContent = '📎 Файл';
     openConv(current, drawerOpen);
   };
@@ -1141,11 +1148,19 @@ async function send(root) {
   const t = inp.value.trim();
   if (!t) return;
   btn.disabled = true;
+  // Поле очищаем сразу. Пока запрос шёл, приходило новое сообщение и чат
+  // перерисовывался: openConv переносил ещё не очищенный текст в новое поле,
+  // а inp.value = '' потом чистил уже старое, невидимое — текст оставался в строке.
+  const keepAi = root.querySelector('[data-r="keep"]').checked;
+  inp.value = ''; inp.style.height = '';
   try {
-    await api(`/api/conversations/${current}/send`, { method: 'POST',
-      body: JSON.stringify({ text: t, keep_ai: root.querySelector('[data-r="keep"]').checked }) });
-    inp.value = '';
-  } catch (e) { toast('Не отправилось: ' + e.message, true); }
+    await api(`/api/conversations/${current}/send`, { method: 'POST', body: JSON.stringify({ text: t, keep_ai: keepAi }) });
+  } catch (e) {
+    toast('Не отправилось: ' + e.message, true);
+    // вернуть текст в то поле, которое сейчас на экране
+    const now = (drawerOpen ? $('#drawer-chat') : $('#inbox-chat'))?.querySelector('[data-r="inp"]') || inp;
+    if (!now.value) now.value = t;
+  }
   btn.disabled = false;
   openConv(current, drawerOpen);
 }
