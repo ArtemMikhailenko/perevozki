@@ -100,6 +100,7 @@ const plural = (n, a, b, c) => { const m = n % 100, k = n % 10;
 const COLUMNS = [
   { k:'need',    t:'Нужен человек', c:'var(--warn)',   hint:'просит позвонить, непонятный вопрос, жалоба' },
   { k:'price',   t:'Дать цену',     c:'var(--s5)', hint:'бот собрал заявку — посчитайте и назовите стоимость' },
+  { k:'old',     t:'Из архива',     c:'var(--s6)', hint:'бывшие клиенты ответили на напоминание бота — бот уточняет' },
   { k:'manager', t:'У менеджера',   c:'var(--s1)',     hint:'человек ведёт сам' },
   { k:'ai',      t:'ИИ уточняет',   c:'var(--accent)', hint:'бот собирает заявку' },
   { k:'quoted',  t:'Назвали цену',  c:'var(--s4)',     hint:'ждём решения клиента' },
@@ -108,6 +109,7 @@ const COLUMNS = [
 // Архив — не одна куча «закрыто»: там вперемешку свои сотрудники, живые лиды
 // «не сейчас» и настоящие отказы. С одной колонкой это невозможно разобрать.
 const ARCHIVE = [
+  { k:'reminded', t:'Бот напомнил', c:'var(--s1)',   hint:'бот написал бывшему клиенту — ждём ответа; ответит — карточка уйдёт на доску «Из архива»' },
   { k:'done',    t:'Переехали с нами', c:'var(--s3)',  hint:'клиент переехал — через 10 месяцев бот спросит про новый переезд' },
   { k:'staff',   t:'Сотрудники',    c:'var(--s1)',     hint:'свои номера, не клиенты' },
   { k:'later',   t:'На потом',      c:'var(--s4)',     hint:'лид живой, но не сейчас' },
@@ -119,6 +121,8 @@ const isArchive = (k) => ARCHIVE.some((x) => x.k === k);
 function columnOf(c) {
   const st = lead(c).stage;
   if (c.status === 'closed' || st === 'отказ') {
+    // бот уже напомнил о себе, клиент пока не ответил
+    if (c.status === 'closed' && c.revived_from && !c.revived_reply_at) return 'reminded';
     return ARCHIVE.some((x) => x.k === c.archive) ? c.archive : 'refused';
   }
   // собранная заявка — отдельно от «нужен человек»: там срочное, тут — дать цену
@@ -126,6 +130,8 @@ function columnOf(c) {
   if (c.needs_human) return 'need';
   if (['готов к заказу', 'дата согласована'].includes(st)) return 'agreed';
   if (st === 'назвали цену') return 'quoted';
+  // бывший клиент ответил на напоминание, диалог ведёт бот — отдельно от новых заявок
+  if (c.revived_from && c.status === 'ai') return 'old';
   if (c.status === 'human') return 'manager';
   return 'ai';
 }
@@ -160,7 +166,9 @@ function paint(box, html) {
 }
 
 function chipFor(c) {
-  if (c.status === 'closed') return '<span class="chip closed">в архиве</span>';
+  if (c.status === 'closed' && c.revived_from && !c.revived_reply_at) return '<span class="chip ai">бот напомнил, ждём ответа</span>';
+  if (c.status === 'closed') return `<span class="chip closed">в архиве${c.followup_who === 'revive' && c.followup_at ? ` · бот напишет ${esc(c.followup_at.slice(8, 10) + '.' + c.followup_at.slice(5, 7))}` : ''}</span>`;
+  if (c.revived_from && c.status !== 'ai') return '<span class="chip ai">из архива</span>';
   if (c.needs_human) return '<span class="chip need">нужен человек</span>';
   return ({ ai:'<span class="chip ai">ИИ ведёт</span>', human:'<span class="chip human">менеджер</span>',
     closed:'<span class="chip closed">закрыта</span>', new:'<span class="chip ai">новая</span>' })[c.status] ?? '';
@@ -745,6 +753,23 @@ function renderFunnel() {
   };
 }
 
+/** Сводка над архивом: кому и когда бот напомнит о себе, кто ждёт ответа, кто ответил. */
+async function reviveStrip(board) {
+  let r;
+  try { r = await api('/api/revive'); } catch { return; }
+  let el = $('#revive-strip');
+  if (!el) { el = document.createElement('div'); el.id = 'revive-strip'; el.className = 'revive-strip'; board.parentNode.insertBefore(el, board); }
+  const d = (iso) => (iso ? iso.slice(8, 10) + '.' + iso.slice(5, 7) : '');
+  el.innerHTML = !r.on ? '<b>Возврат к бывшим клиентам выключен</b> — включается в Настройках'
+    : `<b>Бот напоминает бывшим клиентам</b>
+      <span>сегодня в очереди: <i>${r.due_now}</i>${r.due_now > r.daily_max ? ` (по ${r.daily_max} в день)` : ''}</span>
+      <span>на неделе: <i>${r.week}</i></span>
+      <span>всего запланировано: <i>${r.planned}</i>${r.next ? ` · следующий ${d(r.next)}` : ''}</span>
+      <span>написал за 30 дней: <i>${r.sent_30}</i> (сегодня ${r.sent_today})</span>
+      <span>ждём ответа: <i>${r.waiting}</i></span>
+      <span>ответили за 30 дней: <i>${r.replied_30}</i></span>`;
+}
+
 function renderBoard() {
   const board = $('#board');
   if (!board || dragging) return;
@@ -754,6 +779,7 @@ function renderBoard() {
   rows.forEach((c) => by[columnOf(c)].push(c));
   subLine(rows.length);
   renderHeaderStats();
+  if (leadView === 'archive') reviveStrip(board);
 
   const wip = Number(state.wip_need) || 0;
   paint(board, cols.map((col) => {
@@ -1295,10 +1321,24 @@ function leadHtml(c) {
       ${c.nudges ? `<div class="kv"><dt>Напоминаний</dt><dd>${c.nudges}</dd></div>` : ''}
       <div class="kv"><dt>Создана</dt><dd>${dt(c.created_at).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</dd></div>
     </div>
+    <div class="sect purge"><button class="btn ghost sm danger-t" data-a="purge">Удалить чат навсегда</button>
+      <label class="purge-b"><input type="checkbox" data-r="purge-block"> и не отвечать этому номеру</label></div>
   </div>`;
 }
 
 function bindLead(root, convId) {
+  const purge = root.querySelector('[data-a="purge"]');
+  if (purge) purge.onclick = async () => {
+    const block = root.querySelector('[data-r="purge-block"]')?.checked;
+    if (!confirm(`Удалить этот чат целиком — переписку, фото и карточку? Вернуть будет нельзя.${block ? '\nНомер попадёт в список, которому бот не отвечает.' : ''}`)) return;
+    try {
+      await api(`/api/conversations/${convId}/purge`, { method: 'POST', body: JSON.stringify({ block }) });
+      toast('Чат удалён');
+      current = null;
+      if (drawerOpen) closeDrawer();
+      loadList();
+    } catch (e) { toast(e.message, true); }
+  };
   const col = root.querySelector('[data-r="col"]');
   if (col) col.onchange = () => moveTo(convId, col.value);
   const ta = root.querySelector('[data-r="note"]');

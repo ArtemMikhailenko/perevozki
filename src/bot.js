@@ -162,6 +162,25 @@ function workableDay(iso) {
   return Array.isArray(workHours()[day]);
 }
 
+ /**
+ * Бывший клиент ответил на напоминание и после ответа бота остался в работе (не «не актуально»):
+ * один раз пишем в журнал и сообщаем менеджеру — карточка в «Из архива».
+ */
+function revivedInterest(convId) {
+  const c = getConversation(convId);
+  if (!c?.revived_from || !c.revived_reply_at || c.status === 'closed') return;
+  if (db.prepare("SELECT 1 FROM messages WHERE conv_id=? AND author='system' AND kind='revived-in' LIMIT 1").get(convId)) return;
+  const BACK_FROM = { refused: 'Отказ', later: 'На потом', done: 'Переехали с нами' };
+  let lead = {};
+  try { lead = JSON.parse(c.lead || '{}'); } catch {}
+  const first = db.prepare("SELECT body FROM messages WHERE conv_id=? AND direction='in' AND created_at >= ? ORDER BY id LIMIT 1").get(convId, c.revived_at)?.body;
+  addMessage(convId, { direction: 'out', author: 'system', kind: 'revived-in',
+    body: `Бывший клиент («${BACK_FROM[c.revived_from] || 'архив'}») ответил на напоминание, ему актуально — заявка на доске, в «${c.needs_human ? 'Нужен человек' : 'Из архива'}»` });
+  notifyManagers(`↩️ Бывший клиент ответил на напоминание — ${lead.name || c.name || 'клиент'}, +${c.phone}\n`
+    + `Пишет: ${String(first || '[вложение]').slice(0, 200)}\nЗаявка в «${c.needs_human ? 'Нужен человек' : 'Из архива'}», бот уточняет детали.\n${adminLink(convId)}`)
+    .catch((e) => console.error('уведомление о возврате из архива:', e.message));
+}
+
 const READY_REASON = 'заявка готова — посчитать стоимость переезда';
 const hasMediaIn = (convId) => Boolean(db.prepare(
   "SELECT 1 FROM messages WHERE conv_id=? AND direction='in' AND media IS NOT NULL LIMIT 1").get(convId));
@@ -326,17 +345,24 @@ async function processIncoming({ phone, name, text, wa_id, chat_id = null, media
     const lead = JSON.parse(was.lead || '{}');
     if (lead.stage === 'отказ') lead.stage = 'уточняем';
     const byBot = was.ai_enabled === 1 && getSetting('ai_global') === '1';
-    const reason = `клиент из «${BACK_FROM[was.archive]}» написал снова`;
+    const reply = Boolean(was.revived_from);   // ответ на напоминание бота, а не сам вспомнил
+    const reason = reply ? `бывший клиент («${BACK_FROM[was.archive]}») ответил на напоминание` : `клиент из «${BACK_FROM[was.archive]}» написал снова`;
     db.prepare(`UPDATE conversations SET status=?, archive=NULL, needs_human=?, handoff_reason=?, lead=?, notified_at=NULL,
         followup_at=CASE WHEN followup_who='revive' THEN NULL ELSE followup_at END,
         followup_note=CASE WHEN followup_who='revive' THEN NULL ELSE followup_note END,
-        followup_who=CASE WHEN followup_who='revive' THEN NULL ELSE followup_who END WHERE id=?`)
+        followup_who=CASE WHEN followup_who='revive' THEN NULL ELSE followup_who END,
+        revived_reply_at=CASE WHEN revived_from IS NOT NULL THEN datetime('now') ELSE revived_reply_at END WHERE id=?`)
       .run(byBot ? 'ai' : 'human', byBot ? 0 : 1, byBot ? null : reason, JSON.stringify(lead), conv.id);
+    // Ответ на напоминание бота: сообщаем менеджеру, только когда бот поймёт, что клиенту
+    // актуально (respond → revivedInterest), иначе приходили уведомления и об отказах
+    if (!(reply && byBot)) {
     addMessage(conv.id, { direction: 'out', author: 'system',
-      body: `Клиент из архива «${BACK_FROM[was.archive]}» написал снова — заявка вернулась в работу (${byBot ? 'ИИ уточняет' : 'Нужен человек'})` });
-    notifyManagers(`↩️ Написал клиент из архива «${BACK_FROM[was.archive]}» — ${lead.name || was.name || 'клиент'}, +${was.phone}\n`
-      + `Пишет: ${String(body || '[вложение]').slice(0, 200)}\n${byBot ? 'Бот отвечает, заявка в «ИИ уточняет».' : 'Заявка в «Нужен человек».'}\n${adminLink(conv.id)}`)
+      body: reply ? `Бывший клиент ответил на напоминание — заявка в «Нужен человек»`
+        : `Клиент из архива «${BACK_FROM[was.archive]}» написал снова — заявка вернулась в работу (${byBot ? 'ИИ уточняет' : 'Нужен человек'})` });
+    notifyManagers(`↩️ ${reply ? 'Ответил на напоминание бывший клиент' : 'Написал клиент из архива'} «${BACK_FROM[was.archive]}» — ${lead.name || was.name || 'клиент'}, +${was.phone}\n`
+      + `Пишет: ${String(body || '[вложение]').slice(0, 200)}\n${byBot ? `Бот отвечает, заявка в «${reply ? 'Из архива' : 'ИИ уточняет'}».` : 'Заявка в «Нужен человек».'}\n${adminLink(conv.id)}`)
       .catch((e) => console.error('уведомление о возврате из архива:', e.message));
+    }
   }
 
   // клиент ответил — счётчик напоминаний обнуляем
@@ -501,13 +527,13 @@ async function respond(convId, ch, text) {
   if (fresh.revived_from && !out.needs_human && !out.lead_ready) {
     const months = Math.max(1, Number(getSetting('revive_months')) || 10);
     if (/^\d{4}-\d{2}-\d{2}$/.test(out.follow_up_at || '')) {
-      db.prepare(`UPDATE conversations SET status='closed', archive='later', followup_who='ai', revived_from=NULL WHERE id=?`).run(conv.id);
+      db.prepare(`UPDATE conversations SET status='closed', archive='later', followup_who='ai', revived_from=NULL, revived_reply_at=NULL WHERE id=?`).run(conv.id);
       addMessage(conv.id, { direction: 'out', author: 'system', body: `Клиент назвал срок — в «На потом», бот напишет ${out.follow_up_at}` });
     } else if (lead.stage === 'отказ') {
       const d = new Date(); d.setMonth(d.getMonth() + months);
       const day = new Intl.DateTimeFormat('sv-SE').format(d);
       db.prepare(`UPDATE conversations SET status='closed', archive=?, followup_at=?, followup_who='revive',
-          followup_note=?, revived_from=NULL WHERE id=?`)
+          followup_note=?, revived_from=NULL, revived_reply_at=NULL WHERE id=?`)
         .run(fresh.revived_from, day, fresh.revived_from === 'done' ? 'переезжали с нами — спросить, не нужен ли новый переезд'
           : 'обращались, но не переехали — спросить, актуален ли переезд', conv.id);
       addMessage(conv.id, { direction: 'out', author: 'system', body: `Клиенту пока не актуально — бот снова напишет ${day}` });
@@ -516,6 +542,7 @@ async function respond(convId, ch, text) {
 
   if (out.needs_human) flagHuman(conv.id, out.handoff_reason || 'ИИ передал диалог');
   else if (ready) flagHuman(conv.id, READY_REASON);
+  revivedInterest(conv.id);
 
   let replies = [...(out.replies ?? [])];
 
@@ -669,8 +696,10 @@ export async function runFollowUps() {
           const ok = await sendInitiative(conv, 'followup', { note: conv.followup_note || '', outside: true });
           if (ok) {
             db.prepare("UPDATE messages SET kind='revive-ai' WHERE id=(SELECT max(id) FROM messages WHERE conv_id=? AND direction='out')").run(conv.id);
-            db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
-                followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, revived_from=?, revived_at=datetime('now') WHERE id=?`)
+            // до ответа клиента карточка остаётся в архиве, в колонке «Бот напомнил»
+            db.prepare(`UPDATE conversations SET ai_enabled=1, needs_human=0, handoff_reason=NULL,
+                followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, revived_from=?, revived_at=datetime('now'),
+                revived_reply_at=NULL WHERE id=?`)
               .run(conv.archive === 'later' ? 'refused' : conv.archive, conv.id);
             addMessage(conv.id, { direction: 'out', author: 'system', body: 'Бот написал клиенту в договорённый срок' });
             sent++; changed = true;
@@ -691,9 +720,11 @@ export async function runFollowUps() {
           let lead = {};
           try { lead = JSON.parse(conv.lead || '{}'); } catch {}
           if (lead.stage === 'отказ') lead.stage = 'уточняем';
-          db.prepare(`UPDATE conversations SET status='ai', archive=NULL, ai_enabled=1, needs_human=0, handoff_reason=NULL,
-              followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=?, revived_from=?, revived_at=datetime('now')
-            WHERE id=?`).run(JSON.stringify(lead), conv.archive, conv.id);
+          // Раньше карточка сразу уходила в «ИИ уточняет» и терялась среди новых заявок.
+          // Теперь ждёт ответа в архиве («Бот напомнил»), ответил — выходит на доску «Из архива»
+          db.prepare(`UPDATE conversations SET ai_enabled=1, needs_human=0, handoff_reason=NULL,
+              followup_at=NULL, followup_who=NULL, followup_note=NULL, nudges=0, lead=?, revived_from=?, revived_at=datetime('now'),
+              revived_reply_at=NULL WHERE id=?`).run(JSON.stringify(lead), conv.archive, conv.id);
           addMessage(conv.id, { direction: 'out', author: 'system', body: conv.archive === 'done'
             ? 'Бот написал бывшему клиенту: не планирует ли новый переезд'
             : 'Бот вернулся к клиенту после отказа: спросил, актуален ли переезд' });

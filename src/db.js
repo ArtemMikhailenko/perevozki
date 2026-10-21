@@ -346,6 +346,17 @@ seed.run('revive_daily_max', '15');
   }
 }
 seed.run('revive_months', '10');
+// когда бывший клиент ответил на напоминание: до ответа карточка лежит в архиве («Бот напомнил»),
+// после — на доске в колонке «Из архива»
+if (!db.prepare('PRAGMA table_info(conversations)').all().some((c) => c.name === 'revived_reply_at')) {
+  db.exec('ALTER TABLE conversations ADD COLUMN revived_reply_at TEXT');
+  // кому бот уже написал раньше, но кто ещё не ответил — обратно в архив, ждать ответа там
+  db.exec(`UPDATE conversations SET status='closed', archive=revived_from
+    WHERE revived_from IS NOT NULL AND status='ai' AND needs_human=0
+      AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.conv_id=conversations.id AND m.direction='in' AND m.created_at > conversations.revived_at)`);
+  db.exec(`UPDATE conversations SET revived_reply_at=(SELECT min(created_at) FROM messages m WHERE m.conv_id=conversations.id AND m.direction='in' AND m.created_at > conversations.revived_at)
+    WHERE revived_from IS NOT NULL AND status != 'closed'`);
+}
 // Готовые тексты возврата: «{name}» — имя клиента, «{when}» — «в прошлом году» или
 // «несколько месяцев назад», смотря когда было обращение. По строке на язык, как приветствие
 seed.run('revive_text_lost', [

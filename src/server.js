@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { db, listConversations, getConversation, history, getSetting, setSetting, addMessage, resetData } from './db.js';
 import { handleIncoming, sendAsHuman, sendFileAsHuman, suggestReply, subscribe, emit } from './bot.js';
@@ -544,6 +545,8 @@ app.post('/api/conversations/:id/mode', (req, res) => {
  */
 const COLUMN_ACTIONS = {
   need:    { ai: 0, status: 'human', needs: 1, reason: 'передано менеджеру вручную' },
+  // «Из архива»: бывший клиент ответил на напоминание, бот ведёт диалог
+  old:     { ai: 1, status: 'ai', needs: 0 },
   // «Дать цену»: заявка собрана, менеджеру осталось посчитать и назвать стоимость
   price:   { ai: 0, status: 'human', needs: 1, reason: 'заявка готова — посчитать стоимость переезда', stage: 'заявка готова' },
   manager: { ai: 0, status: 'human', needs: 0, stage: 'уточняем' },
@@ -557,6 +560,51 @@ const COLUMN_ACTIONS = {
   refused: { status: 'closed', needs: 0, archive: 'refused', stage: 'отказ' }
 };
 COLUMN_ACTIONS.closed = COLUMN_ACTIONS.refused;   // старое имя колонки
+
+/**
+ * Возвраты к бывшим клиентам: кому и когда бот напишет, кто ждёт ответа, кто ответил.
+ * Раньше это было видно только по одной карточке — отсюда «не вижу, что бот кому-то пишет».
+ */
+app.get('/api/revive', (req, res) => {
+  const today = new Intl.DateTimeFormat('sv-SE', { timeZone: getSetting('timezone') || 'Asia/Jerusalem' }).format(new Date());
+  const week = new Date(Date.parse(today + 'T12:00:00Z') + 7 * 864e5).toISOString().slice(0, 10);
+  const plan = db.prepare(`SELECT followup_at d, archive FROM conversations WHERE status='closed' AND followup_who IN ('revive','ai')
+    AND nudge_stop=0 AND followup_at IS NOT NULL`).all();
+  const one = (sql, ...a) => db.prepare(sql).get(...a).n;
+  res.json({
+    on: getSetting('revive_on') === '1',
+    daily_max: Number(getSetting('revive_daily_max')) || 15,
+    due_now: plan.filter((p) => p.d <= today).length,
+    week: plan.filter((p) => p.d > today && p.d <= week).length,
+    planned: plan.length,
+    next: plan.filter((p) => p.d > today).map((p) => p.d).sort()[0] || null,
+    sent_30: one(`SELECT count(*) n FROM messages WHERE kind IN ('revive','revive-ai') AND created_at >= datetime('now','-30 days')`),
+    sent_today: one(`SELECT count(*) n FROM messages WHERE kind IN ('revive','revive-ai') AND created_at >= datetime('now','-20 hours')`),
+    waiting: one(`SELECT count(*) n FROM conversations WHERE revived_from IS NOT NULL AND revived_reply_at IS NULL AND status='closed'`),
+    replied_30: one(`SELECT count(*) n FROM conversations WHERE revived_reply_at >= datetime('now','-30 days')`)
+  });
+});
+
+/**
+ * Удалить чат совсем: ошибочные и нерелевантные переписки, которые жалко обрабатывать.
+ * Удаляются диалог, сообщения и файлы. block — номер больше не получит ответа бота.
+ */
+app.post('/api/conversations/:id/purge', (req, res) => {
+  const conv = getConversation(Number(req.params.id));
+  if (!conv) return res.sendStatus(404);
+  const files = db.prepare('SELECT media FROM messages WHERE conv_id=? AND media IS NOT NULL').all(conv.id)
+    .flatMap((m) => { try { return JSON.parse(m.media).map((x) => x.file).filter(Boolean); } catch { return []; } });
+  db.prepare('DELETE FROM messages WHERE conv_id=?').run(conv.id);
+  db.prepare('DELETE FROM conversations WHERE id=?').run(conv.id);
+  for (const f of files) { try { fs.rmSync(path.join(process.cwd(), 'data', 'media', path.basename(f)), { force: true }); } catch {} }
+  if (req.body?.block) {
+    const cur = String(getSetting('blocked_numbers') || '');
+    if (!cur.split(/[,;\n]+/).map((x) => x.replace(/\D/g, '')).includes(String(conv.phone))) setSetting('blocked_numbers', (cur ? cur + '\n' : '') + conv.phone);
+  }
+  console.log(`[удаление] чат +${conv.phone} удалён целиком${req.body?.block ? ', номер заблокирован' : ''}`);
+  emit('conversations', null);
+  res.json({ ok: true });
+});
 
 app.post('/api/conversations/:id/column', (req, res) => {
   const id = Number(req.params.id);
