@@ -12,6 +12,11 @@ let jobs = [], weekOffset = 0, animStep = 0;
 let leadView = localStorage.getItem('leadView') || 'list';
 // стадия, выбранная в воронке бокового меню; null — показываем все
 let stageFilter = null;
+let unreadOnly = false;   // «Непрочитанные»: только те, кто написал, а мы ещё не открыли чат
+// Порядок в колонке: кто написал последним — наверху. Раньше клиент, который ответил
+// через неделю, оставался внизу колонки, и его приходилось искать среди всех
+const lastClient = (c) => String(c.last_in_at || c.last_at || '');
+const byLastClient = (a, b) => (b.unread > 0) - (a.unread > 0) || lastClient(b).localeCompare(lastClient(a));
 // какие карточки уже показывали: иначе анимация проигрывалась бы
 // на каждое входящее сообщение и доска дёргалась бы без повода
 const seen = new Set();
@@ -138,6 +143,7 @@ function columnOf(c) {
 const colTitle = (k) => (ALL_COLS.find((x) => x.k === k) || { t: k }).t;
 
 const matches = (c) => {
+  if (unreadOnly && !(c.unread > 0)) return false;
   // на доске чужие колонки только приглушаются, фильтрует лишь список
   if (stageFilter && leadView === 'list' && columnOf(c) !== stageFilter) return false;
   const q = query.trim().toLowerCase();
@@ -216,6 +222,7 @@ function leadsTools() {
       <button data-v="board" class="${leadView === 'board' ? 'on' : ''}">Доска</button>
       <button data-v="archive" class="${leadView === 'archive' ? 'on' : ''}">Архив</button>
     </div>
+    <button class="btn ${unreadOnly ? 'primary' : ''}" id="unread-only" title="Только клиенты, которые написали, а чат ещё не открыли">Непрочитанные <b id="unread-n">${convs.filter((c) => c.unread > 0).length}</b></button>
     <div class="hstat" id="hstat"></div>` + searchTool()
     + `<button class="btn" id="csv">CSV</button>`;
 }
@@ -237,6 +244,7 @@ function bindTools() {
   if (q) q.oninput = (e) => { query = e.target.value; PAGES[page].render(); };
   $$('#days button').forEach((b) => b.onclick = () => { statsDays = Number(b.dataset.d); loadStats(); });
   $('#csv') && ($('#csv').onclick = exportCsv);
+  $('#unread-only') && ($('#unread-only').onclick = () => { unreadOnly = !unreadOnly; go('inbox'); });
   $$('#view-seg button').forEach((b) => b.onclick = () => {
     leadView = b.dataset.v;
     localStorage.setItem('leadView', leadView);
@@ -777,6 +785,7 @@ function renderBoard() {
   const rows = convs.filter(matches).filter((c) => isArchive(columnOf(c)) === (leadView === 'archive'));
   const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
+  for (const k of Object.keys(by)) by[k].sort(byLastClient);
   subLine(rows.length);
   renderHeaderStats();
   if (leadView === 'archive') reviveStrip(board);
@@ -848,6 +857,7 @@ function renderLeads() {
   const rows = convs.filter(matches);
   const by = Object.fromEntries(ALL_COLS.map((x) => [x.k, []]));
   rows.forEach((c) => by[columnOf(c)].push(c));
+  for (const k of Object.keys(by)) by[k].sort(byLastClient);
   subLine(rows.length);
   renderHeaderStats();
 
@@ -922,6 +932,7 @@ function chatHtml(c) {
                      : '<button class="btn primary" data-a="giveback">Вернуть ИИ</button>'}
       <button class="btn" data-a="card">Карточка</button>
       <button class="btn ghost" data-a="close">${c.status === 'closed' ? 'Открыть' : 'Закрыть'}</button>
+      <button class="btn ghost danger-t" data-a="purge-chat" title="Удалить чат навсегда — для ошибочных и нерелевантных номеров">Удалить</button>
       <button class="btn ghost more-btn" data-a="move" title="Перенести в другую колонку" aria-label="Перенести">⋯</button>
     </div>
     ${c.needs_human ? `<div class="alert">⚠ ${esc(c.handoff_reason || 'ИИ просит подключиться')}</div>` : ''}
@@ -963,6 +974,7 @@ function bindChat(root) {
   q('[data-a="giveback"]') && (q('[data-a="giveback"]').onclick = () => setMode(true));
   // В архиве три корзины, и выбирать её должен человек: свои сотрудники,
   // живой лид «не сейчас» и настоящий отказ — это разные вещи.
+  q('[data-a="purge-chat"]') && (q('[data-a="purge-chat"]').onclick = () => purgeConv(c.id));
   q('[data-a="close"]').onclick = (e) => {
     if (c.status === 'closed') return moveTo(c.id, 'manager');
     const old = root.querySelector('.pickmenu');
@@ -1326,19 +1338,24 @@ function leadHtml(c) {
   </div>`;
 }
 
+/** Удалить чат навсегда: переписка, фото и карточка. По желанию — больше не отвечать номеру. */
+async function purgeConv(convId, block = null) {
+  if (!confirm('Удалить этот чат целиком — переписку, фото и карточку? Вернуть будет нельзя.')) return;
+  if (block === null) block = confirm('Больше не отвечать этому номеру?\nОК — бот не будет ему отвечать. Отмена — просто удалить чат.');
+  try {
+    await api(`/api/conversations/${convId}/purge`, { method: 'POST', body: JSON.stringify({ block }) });
+    toast(block ? 'Чат удалён, номер больше не получит ответа' : 'Чат удалён');
+    current = null;
+    if (drawerOpen) closeDrawer();
+    if ($('#inbox-chat')) $('#inbox-chat').innerHTML = '';
+    if ($('#inbox-lead')) $('#inbox-lead').innerHTML = '';
+    loadList();
+  } catch (e) { toast(e.message, true); }
+}
+
 function bindLead(root, convId) {
   const purge = root.querySelector('[data-a="purge"]');
-  if (purge) purge.onclick = async () => {
-    const block = root.querySelector('[data-r="purge-block"]')?.checked;
-    if (!confirm(`Удалить этот чат целиком — переписку, фото и карточку? Вернуть будет нельзя.${block ? '\nНомер попадёт в список, которому бот не отвечает.' : ''}`)) return;
-    try {
-      await api(`/api/conversations/${convId}/purge`, { method: 'POST', body: JSON.stringify({ block }) });
-      toast('Чат удалён');
-      current = null;
-      if (drawerOpen) closeDrawer();
-      loadList();
-    } catch (e) { toast(e.message, true); }
-  };
+  if (purge) purge.onclick = () => purgeConv(convId, Boolean(root.querySelector('[data-r="purge-block"]')?.checked));
   const col = root.querySelector('[data-r="col"]');
   if (col) col.onchange = () => moveTo(convId, col.value);
   const ta = root.querySelector('[data-r="note"]');
@@ -1796,6 +1813,7 @@ async function loadList() {
   const prev = new Map(convs.map((c) => [c.id, c.needs_human]));
   const known = new Set(convs.map((c) => c.id));
   convs = await api('/api/conversations');
+  if ($('#unread-n')) $('#unread-n').textContent = convs.filter((c) => c.unread > 0).length;
   // впервые увиденная заявка подсветится вспышкой, а не просто появится
   if (known.size) for (const c of convs) if (!known.has(c.id)) markFresh(c.id);
   // уведомляем только о новых передачах человеку, а не о каждом обновлении
